@@ -83,17 +83,7 @@ prompt_input() {
     echo "${response:-$default}"
 }
 
-backup_file() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        local timestamp=$(date +"%Y%m%d_%H%M%S")
-        local backup="${file}.backup_${timestamp}"
-        cp "$file" "$backup"
-        print_success "已备份: $file → $backup"
-        return 0
-    fi
-    return 1
-}
+# 备份功能已移除：Klipper 与 Moonraker 会自动备份各自的配置文件
 
 create_symlink() {
     local src="$1"
@@ -139,7 +129,6 @@ ensure_printer_cfg_include() {
     local include_line="[include ace.cfg]"
     if ! grep -qF "$include_line" "$PRINTER_CFG" 2>/dev/null; then
         print_info "正在将 '[include ace.cfg]' 插入 printer.cfg 顶部..."
-        backup_file "$PRINTER_CFG"
         sed -i "1i $include_line" "$PRINTER_CFG"
         print_success "已添加引用至 printer.cfg"
     else
@@ -189,8 +178,7 @@ install_config() {
         return 1
     fi
     if [ -f "$KLIPPER_CONFIG_HOME/ace.cfg" ]; then
-        print_warning "ace.cfg 已存在，将备份后覆盖"
-        backup_file "$KLIPPER_CONFIG_HOME/ace.cfg"
+        print_warning "ace.cfg 已存在，将直接覆盖"
     fi
     cp "$SRC_ACE_CFG" "$KLIPPER_CONFIG_HOME/"
     print_success "ace.cfg 已复制到 $KLIPPER_CONFIG_HOME"
@@ -203,7 +191,6 @@ install_moonraker_component() {
     
     print_info "检查 moonraker.conf 中的 [ace_status]..."
     if ! grep -qi '^[[:space:]]*\[ace_status\]' "$MOONRAKER_CONFIG" 2>/dev/null; then
-        backup_file "$MOONRAKER_CONFIG"
         echo -e "\n[ace_status]" >> "$MOONRAKER_CONFIG"
         print_success "已添加 [ace_status] 到 moonraker.conf"
     else
@@ -223,7 +210,6 @@ managed_services: klipper"
     if grep -qF "[update_manager SolisACE]" "$MOONRAKER_CONFIG" 2>/dev/null; then
         print_success "更新管理器已存在"
     else
-        backup_file "$MOONRAKER_CONFIG"
         echo -e "\n$updater_section" >> "$MOONRAKER_CONFIG"
         print_success "已添加更新管理器配置"
     fi
@@ -240,8 +226,6 @@ configure_moonraker_cors() {
         echo "    https://*"
         return 0
     fi
-
-    backup_file "$MOONRAKER_CONFIG"
 
     if grep -q '^\[authorization\]' "$MOONRAKER_CONFIG" 2>/dev/null; then
         # [authorization] 段已存在，在其后插入 cors_domains
