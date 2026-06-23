@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# Klipper 运行时 / 配置备份
+vars.cfg
+*.backup_*
+*.bak
+
+# Understand-Anything 生成的知识图谱缓存
+.understand-anything/
+
+# 日志
+*.log
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+
+# 操作系统
+.DS_Store
+Thumbs.db
+
+# Node（前端工具链，如有）
+node_modules/
