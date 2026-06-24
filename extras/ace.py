@@ -277,8 +277,7 @@ class SolisAce:
     def _validate_slot_status(self, real_slot: int, required_status: str = 'ready') -> tuple:
         """
         检查料槽状态.
-        Check slot status.
-        
+
         :param real_slot: 设备的真实料槽(0-3)
         :param required_status: 所需状态('ready', 'empty', etc.)
         :return: 元组(is_valid, error_message)
@@ -313,9 +312,8 @@ class SolisAce:
 
     def _validate_index_for_operation(self, index: int, operation_name: str = "operation") -> tuple:
         """
-        对操作进行INDEX的综合验证(检查INDEX + 料槽状态).
-        Comprehensive INDEX validation for operation(INDEX check + slot status check).
-        
+        对操作进行INDEX的综合验证（检查INDEX范围 + 设备连接状态）.
+
         :param index: 来自Klipper的索引(0-3)
         :param operation_name: 用于错误消息的操作名称
         :return: 元组(real_slot, error_message)
@@ -470,15 +468,15 @@ class SolisAce:
                     self._serial = None
                 self.dwell(1.0, lambda: None)
                 
-        self.logger.info("无法连接到ACE设备")
+        self.logger.info("Failed to connect to ACE device")
         return False
 
     def _disconnect(self):
-        """优雅地断开与设备的连接,并停止所有计时器"""
+        """优雅地断开与设备的连接，注销读写定时器并清空挂起队列。"""
         if not self._connected:
             return
-            
-        self.logger.info("正在断开与ACE设备的连接...")
+
+        self.logger.info("Disconnecting from ACE device...")
         
         # 停止所有计时器
         if self._reader_timer:
@@ -513,7 +511,7 @@ class SolisAce:
         except Exception as e:
             self.logger.debug(f"Error clearing request queue: {str(e)}")
         
-        # Clear callback map
+        # 清空回调映射表，避免断开后旧回调被错误触发
         self._callback_map.clear()
         
         self.logger.info("ACE device disconnected successfully")
@@ -751,15 +749,7 @@ class SolisAce:
         if 'result' in response and isinstance(response['result'], dict):
             result = response['result']
             
-            # 调试:为所有带有状态的响应输出原始 JSON
-            # 检查烘干机数据的存在作为 get_status 响应的标志
-            if 'dryer' in result or 'dryer_status' in result or 'slots' in result:
-                self.logger.info(f"RAW JSON response from device (get_status): {json.dumps(response, indent=2)}")
-                if 'dryer' in result or 'dryer_status' in result:
-                    dryer_data = result.get('dryer') or result.get('dryer_status', {})
-                    self.logger.info(f"RAW dryer data: {json.dumps(dryer_data, indent=2)}")
-            
-            # 标准化烘干机数据:如果传入 dryer_status,则也保存为 dryer
+            # 标准化烘干机数据：如果传入 dryer_status，则同时写入 dryer 键保持兼容
             if 'dryer_status' in result and isinstance(result['dryer_status'], dict):
                 result['dryer'] = result['dryer_status']
             self._info.update(result)
@@ -920,9 +910,9 @@ class SolisAce:
         self._pause_print_if_needed()
 
     def _reconnect(self):
-        """尝试重新连接到设备"""
+        """串口读写出错时触发，自动重连；超过最大次数后标记 _connection_lost 并通知用户。"""
         if self._connection_lost:
-            return  # 已超过限制,尝试连接
+            return  # 已超过最大重连次数，停止重试
             
         self._reconnect_attempts += 1
         if self._reconnect_attempts > self._max_reconnect_attempts:
@@ -965,21 +955,12 @@ class SolisAce:
         try:
             # 输出前请求最新状态
             def status_callback(response):
-                # 调试:输出原始JSON响应
-                self.logger.info(f"RAW JSON response in ACE_STATUS callback: {json.dumps(response, indent=2)}")
-                
                 if 'result' in response:
                     result = response['result']
-                    # 调试:输出数据关于烘干机
-                    if 'dryer' in result or 'dryer_status' in result:
-                        dryer_data = result.get('dryer') or result.get('dryer_status', {})
-                        self.logger.info(f"RAW dryer data in callback: {json.dumps(dryer_data, indent=2)}")
-                    
                     # 标准化烘干机数据
                     if 'dryer_status' in result and isinstance(result['dryer_status'], dict):
                         result['dryer'] = result['dryer_status']
                     self._info.update(result)
-                    # 输出状态 after 更新
                     self._output_status(gcmd)
             
             # 发送状态请求
@@ -2640,11 +2621,11 @@ class TemperatureACE:
                 # 检查温度限制
                 if self.temp < self.min_temp and self.temp > 0:
                     self.printer.invoke_shutdown(
-                        "ACE温度 %.1f 低于最低温度 %.1f"
+                        "ACE temperature %.1f below minimum temperature of %.1f"
                         % (self.temp, self.min_temp))
                 if self.temp > self.max_temp:
                     self.printer.invoke_shutdown(
-                        "ACE温度 %.1f 高于最高温度 %.1f"
+                        "ACE temperature %.1f above maximum temperature of %.1f"
                         % (self.temp, self.max_temp))
             else:
                 # ACE不可用，报告0

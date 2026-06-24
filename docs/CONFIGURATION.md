@@ -37,7 +37,7 @@ baud: 115200
 ACE 设备的串口路径。
 
 **类型：** 字符串  
-**默认值：** 按 VID/PID 自动搜索，或 `/dev/ttyACM0`
+**默认值：** `/dev/ttyACM0`
 
 **示例：**
 ```ini
@@ -47,13 +47,9 @@ serial: /dev/ttyUSB0
 ```
 
 **建议：**
-- 使用 `/dev/serial/by-id/` 路径，设备重新插拔后路径不变
-- 模块会按 VID/PID `0x28e9:0x018a` 自动检测设备
-- 若自动检测可用，可不填此项
-
-**自动搜索条件：**
-- VID/PID：`0x28e9:0x018a`
-- 端口描述包含："ACE"、"BunnyAce"、"DuckAce"
+- 使用 `/dev/serial/by-id/` 路径，设备重新插拔后路径不变（稳定）
+- 用 `ls /dev/serial/by-id/` 查找设备对应的路径
+- 默认值 `/dev/ttyACM0` 仅在单 USB 设备时可靠，多设备场景请明确填写
 
 ---
 
@@ -494,11 +490,19 @@ gcode:
 
 #### `_ACE_PRE_INFINITYSPOOL`
 
-无限料盘切换前执行。无参数。
+无限料盘切换前执行。
+
+**参数：**
+- `FROM` —— 当前槽位索引（耗材已用完）
+- `TO` —— 即将切入的槽位索引
 
 #### `_ACE_POST_INFINITYSPOOL`
 
-无限料盘切换后执行。无参数。
+无限料盘切换后执行。
+
+**参数：**
+- `FROM` —— 刚离开的槽位索引
+- `TO` —— 已切入的槽位索引
 
 #### `SET_INFINITY_SPOOL_ORDER`
 

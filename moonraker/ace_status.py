@@ -224,7 +224,7 @@ class AceStatus:
             return {"error": str(exc)}
 
     async def _handle_status_update(self, status: Dict[str, Any]) -> None:
-        """缓存 Moonraker 通过 notify_status_update 推送过来的状态。"""
+        """缓存 Klipper 状态变化事件（server:status_update）推送的 ACE 对象数据，并向前端广播。"""
         try:
             # 只关心 ace 对象的更新：缓存它并向前端广播 ace:status_update 事件
             ace_data = status.get("ace")

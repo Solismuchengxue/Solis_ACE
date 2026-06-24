@@ -157,7 +157,7 @@ ACE_CHANGE_TOOL TOOL=-1   # 卸载当前耗材
 **说明：**
 - 命令自动检查槽位就绪状态
 - 若槽位为空，将调用宏 `_ACE_ON_EMPTY_ERROR`
-- 整个过程为异步执行，不阻塞打印
+- 整个过程为阻塞式执行：回退、等待槽位就绪、停泊到喷嘴均在 gcode 队列中串行完成
 
 ---
 
@@ -343,7 +343,7 @@ ACE_START_DRYING TEMP=<温度> DURATION=<时间>
 
 **参数：**
 - `TEMP`（必填）—— 烘干温度（°C），范围 20-55，受 `max_dryer_temperature` 限制
-- `DURATION`（可选）—— 持续时间（分钟），默认 240，最大 240
+- `DURATION`（可选）—— 持续时间（分钟），默认 240，无上限
 
 **示例：**
 ```gcode
@@ -752,8 +752,8 @@ TR  # 等同于 ACE_CHANGE_TOOL TOOL=-1
 
 | 宏名 | 说明 |
 |------|------|
-| `_ACE_PRE_INFINITYSPOOL` | 无限料盘切换前执行 |
-| `_ACE_POST_INFINITYSPOOL` | 无限料盘切换后执行 |
+| `_ACE_PRE_INFINITYSPOOL` | 无限料盘切换前执行，接收 `FROM`（旧槽位）、`TO`（新槽位）参数 |
+| `_ACE_POST_INFINITYSPOOL` | 无限料盘切换后执行，接收 `FROM`、`TO` 参数 |
 | `SET_INFINITY_SPOOL_ORDER ORDER="..."` | 便捷设置槽位顺序 |
 | `RESET_INFINITY_SPOOL` | 重置顺序位置到起点 |
 

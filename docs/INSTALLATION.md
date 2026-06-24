@@ -289,7 +289,7 @@ serial: /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
 baud: 115200
 ```
 
-**说明：** 模块会按 VID/PID 自动检测设备，若自动检测可用，可不填 `serial`。
+**说明：** 建议使用 `/dev/serial/by-id/` 路径，设备重插后路径不变。用 `ls /dev/serial/by-id/` 找到 ACE 对应的条目后填入。
 
 ### 基础参数配置
 
