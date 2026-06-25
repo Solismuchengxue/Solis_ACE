@@ -2265,6 +2265,8 @@ class SolisAce:
 
         def check_after_step(eventtime):
             """Phase 2 回退步进后检查：超时/超距→交 ACE 单独回退；传感器1清除(脱离齿轮)→转 ACE 单独退剩余；否则继续。"""
+            if not self._retract_in_progress:  # 被中止则自终止
+                return self.reactor.NEVER
             elapsed = self.reactor.monotonic() - sync_start_time
 
             # 超时：ACE 继续完成剩余回退
@@ -2444,10 +2446,12 @@ class SolisAce:
                     while self._retract_in_progress:
                         if self._retract_error:
                             gcmd.respond_raw(f"ACE Error: Sync retract failed for slot {real_was}")
+                            self._abort_active_op(real_was, "sync retract failed")
                             self._pause_print_if_needed()
                             return
                         if self.reactor.monotonic() > retract_timeout:
                             gcmd.respond_raw(f"ACE Error: Sync retract timeout for slot {real_was}")
+                            self._abort_active_op(real_was, "sync retract timeout")
                             self._pause_print_if_needed()
                             return
                         if self.toolhead:
@@ -2474,6 +2478,8 @@ class SolisAce:
                     while self._info['slots'][real_was]['status'] != 'ready':
                         if self.reactor.monotonic() > timeout:
                             gcmd.respond_raw(f"ACE Error: Timeout waiting for slot {real_was} to be ready")
+                            self._abort_active_op(real_was, "slot-ready timeout (simple retract)")
+                            self._pause_print_if_needed()
                             return
                         if self.toolhead:
                             self.toolhead.dwell(1.0)
@@ -2492,14 +2498,17 @@ class SolisAce:
                 while self._park_in_progress:
                     if self._connection_lost:
                         gcmd.respond_raw(f"ACE Error: Connection lost during parking for slot {real_tool}")
+                        self._abort_active_op(real_tool, "connection lost during parking")
                         self._pause_print_if_needed()
                         return
                     if self._park_error:
                         gcmd.respond_raw(f"ACE Error: Parking failed for slot {real_tool}")
+                        self._abort_active_op(real_tool, "parking failed")
                         self._pause_print_if_needed()
                         return
                     if self.reactor.monotonic() > timeout:
                         gcmd.respond_raw(f"ACE Error: Timeout waiting for parking to complete ({self.max_parking_timeout}s)")
+                        self._abort_active_op(real_tool, "parking timeout")
                         self._pause_print_if_needed()
                         return
                     if self.toolhead:
@@ -2537,14 +2546,17 @@ class SolisAce:
             while self._park_in_progress:
                 if self._connection_lost:
                     gcmd.respond_raw(f"ACE Error: Connection lost during parking for slot {real_tool}")
+                    self._abort_active_op(real_tool, "connection lost during parking")
                     self._pause_print_if_needed()
                     return
                 if self._park_error:
                     gcmd.respond_raw(f"ACE Error: Parking failed for slot {real_tool}")
+                    self._abort_active_op(real_tool, "parking failed")
                     self._pause_print_if_needed()
                     return
                 if self.reactor.monotonic() > timeout:
                     gcmd.respond_raw(f"ACE Error: Timeout waiting for parking to complete ({self.max_parking_timeout}s)")
+                    self._abort_active_op(real_tool, "parking timeout")
                     self._pause_print_if_needed()
                     return
                 if self.toolhead:
@@ -2960,6 +2972,32 @@ class SolisAce:
                 self.gcode.run_script_from_command(self.pause_macro_name)
             except Exception as e:
                 self.logger.error(f"Error triggering {self.pause_macro_name}: {str(e)}")
+
+    def _abort_active_op(self, index, reason=""):
+        """中止进行中的停泊/回退操作并清理后台（F3）：复位进行中标志（使被守卫的定时器自终止）、
+        注销监控定时器、尽力停止 ACE 送料/回退/送料辅助。用于 cmd 在超时/连接丢失/出错时收尾，
+        避免后台异步继续走料或稍后完成造成状态错乱。"""
+        if reason:
+            self.logger.info(f"Aborting active op for slot {index}: {reason}")
+        # 复位进行中标志：_handle_response 轮询、传感器/同步定时器均以此为守卫，将自终止
+        self._park_in_progress = False
+        self._retract_in_progress = False
+        self._sensor_parking_active = False
+        self._sensor_parking_completed = False
+        self._encoder_enabled = False
+        # 注销已跟踪的监控定时器
+        for attr in ('_sensor_monitor_timer', '_park_monitor_timer'):
+            timer = getattr(self, attr, None)
+            if timer is not None:
+                try:
+                    self.reactor.unregister_timer(timer)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        # 尽力停止设备侧动作（送料/回退/送料辅助），防止后台继续走料
+        if isinstance(index, int) and 0 <= index <= 3:
+            for method in ("stop_feed_filament", "stop_unwind_filament", "stop_feed_assist"):
+                self.send_request({"method": method, "params": {"index": index}}, lambda r: None)
 
     def _save_variable(self, name: str, value):
         """如果save_variables模块可用, 则安全地保存变量"""
