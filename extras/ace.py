@@ -875,19 +875,11 @@ class SolisAce:
             "params": {"index": self._park_index}
         }, stop_feed_assist_callback)
         
-        # 如果这是工具切换,则执行后处理宏
-        if self._park_is_toolchange:
-            self.logger.info(f"Executing post-toolchange macro: FROM={self._park_previous_tool} TO={self._park_index}")
-            # 根据模式调用相应的 POST 宏
-            if self.ins_spool_work:
-                self.gcode.run_script_from_command(
-                    f'_ACE_POST_INFINITYSPOOL FROM={self._park_previous_tool} TO={self._park_index}'
-                )
-            else:
-                self.gcode.run_script_from_command(
-                    f'_ACE_POST_TOOLCHANGE FROM={self._park_previous_tool} TO={self._park_index}'
-                )
-        
+        # POST 宏（_ACE_POST_TOOLCHANGE / _ACE_POST_INFINITYSPOOL）统一由
+        # cmd_ACE_CHANGE_TOOL 在等待停车完成后调用，此处不再执行：
+        #   - 避免每次换色冲刷跑两次（F1）
+        #   - 避免从 reader loop 上下文里跑宏（见 F4）
+        #   - cmd 用 Klipper 索引 TO={tool}，比此处真实槽 TO={_park_index} 更正确
         self._park_in_progress = False
         self._park_error = False  # 重置错误标志
         self._park_is_toolchange = False
@@ -2196,9 +2188,11 @@ class SolisAce:
                     while self._retract_in_progress:
                         if self._retract_error:
                             gcmd.respond_raw(f"ACE Error: Sync retract failed for slot {real_was}")
+                            self._pause_print_if_needed()
                             return
                         if self.reactor.monotonic() > retract_timeout:
                             gcmd.respond_raw(f"ACE Error: Sync retract timeout for slot {real_was}")
+                            self._pause_print_if_needed()
                             return
                         if self.toolhead:
                             self.toolhead.dwell(1.0)
@@ -2246,6 +2240,7 @@ class SolisAce:
                         return
                     if self._park_error:
                         gcmd.respond_raw(f"ACE Error: Parking failed for slot {real_tool}")
+                        self._pause_print_if_needed()
                         return
                     if self.reactor.monotonic() > timeout:
                         gcmd.respond_raw(f"ACE Error: Timeout waiting for parking to complete ({self.max_parking_timeout}s)")
@@ -2290,6 +2285,7 @@ class SolisAce:
                     return
                 if self._park_error:
                     gcmd.respond_raw(f"ACE Error: Parking failed for slot {real_tool}")
+                    self._pause_print_if_needed()
                     return
                 if self.reactor.monotonic() > timeout:
                     gcmd.respond_raw(f"ACE Error: Timeout waiting for parking to complete ({self.max_parking_timeout}s)")
