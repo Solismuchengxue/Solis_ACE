@@ -23,6 +23,7 @@ class SolisAce:
     支持最多4个耗材料槽, 具备干燥、送料和回抽耗材的功能
     """
     def __init__(self, config):
+        """SolisAce 主模块初始化：读取配置参数、初始化状态、注册 G-code 命令与事件处理，并启动设备连接。"""
         self.printer = config.get_printer()
         self.toolhead = None
         self.reactor = self.printer.get_reactor()
@@ -194,6 +195,7 @@ class SolisAce:
         self.infinity_spool_pause_on_no_sensor = config.getboolean('infinity_spool_pause_on_no_sensor', True)
 
     def _get_default_info(self) -> Dict[str, Any]:
+        """返回设备信息字典的默认值（未连接时的占位结构）。"""
         return {
             'status': 'disconnected',
             'dryer': {
@@ -394,6 +396,7 @@ class SolisAce:
         self.printer.register_event_handler('klippy:disconnect', self._handle_disconnect)
 
     def _register_gcode_commands(self):
+        """注册所有 ACE_* G-code 命令到 Klipper。"""
         commands = [
             ('ACE_DEBUG', self.cmd_ACE_DEBUG, "ACE调试连接"),
             ('ACE_STATUS', self.cmd_ACE_STATUS, "ACE设备状态查询"),
@@ -430,6 +433,7 @@ class SolisAce:
             self.gcode.register_command(name, func, desc=desc)
 
     def _connect_check(self, eventtime):
+        """连接看门狗（reactor 定时器，每秒一次）：若未连接且非手动断开则尝试重连。"""
         # 仅当设备未连接且未被手动断开时自动连接
         if not self._connected and not self._manually_disconnected:
             # 尝试连接
@@ -437,6 +441,7 @@ class SolisAce:
         return eventtime + 1.0
 
     def _connect(self) -> bool:
+        """打开串口连接 ACE（带重试）：成功后注册收发定时器并请求设备信息。返回是否连接成功。"""
         if self._connected:
             return True
             
@@ -564,6 +569,7 @@ class SolisAce:
             self.logger.debug(f"Could not save variable {name}: {e}")
 
     def _handle_ready(self):
+        """Klipper ready 事件：获取 toolhead 引用并初始化料槽映射。"""
         self.toolhead = self.printer.lookup_object('toolhead')
         if self.toolhead is None:
             raise self.printer.config_error("Toolhead not found in SolisAce module")
@@ -572,6 +578,7 @@ class SolisAce:
         self._init_slot_mapping()
 
     def _handle_disconnect(self):
+        """Klipper disconnect 事件：打印中则触发暂停宏，然后断开设备连接。"""
         # 当klipper断开连接时,重置手动断开连接标记,以便重启后自动重连功能能够正常工作
         self._manually_disconnected = False
 
@@ -653,6 +660,7 @@ class SolisAce:
         return crc & 0xffff
 
     def send_request(self, request: Dict[str, Any], callback: Callable):
+        """将请求加入发送队列并分配请求 id；队列溢出时清空并对被丢弃的请求回调错误。"""
         if self._queue.qsize() >= self._max_queue_size:
             self.logger.info("Request queue overflow, clearing...")
             while not self._queue.empty():
@@ -666,12 +674,14 @@ class SolisAce:
         self._queue.put((request, callback))
 
     def _get_next_request_id(self) -> int:
+        """生成下一个请求 id（递增，达 300000 回绕）。"""
         self._request_id += 1
         if self._request_id >= 300000:
             self._request_id = 0
         return self._request_id
 
     def _send_request(self, request: Dict[str, Any]) -> bool:
+        """将请求打包为协议帧（0xFFAA 帧头 + 长度 + JSON + CRC16 + 0xFE 帧尾）并经串口发送。返回是否成功。"""
         try:
             payload = json.dumps(request).encode('utf-8')
         except Exception as e:
@@ -699,6 +709,7 @@ class SolisAce:
             return False
 
     def _reader_loop(self, eventtime):
+        """串口读循环（reactor 定时器）：读取字节进缓冲区并触发消息解析。"""
         if not self._connected or not self._serial or not self._serial.is_open:
             return eventtime + 0.01
         try:
@@ -712,6 +723,7 @@ class SolisAce:
         return eventtime + 0.01
 
     def _process_messages(self):
+        """从读缓冲区按帧切分并解析消息：校验帧头/长度/CRC 后交给 _handle_response；连续残帧过多则重置连接。"""
         incomplete_message_count = 0
         max_incomplete_messages_before_reset = 10
         while self.read_buffer:
@@ -746,6 +758,7 @@ class SolisAce:
                 self.logger.info(f"Message processing error: {str(e)} Data: {msg}")
 
     def _writer_loop(self, eventtime):
+        """串口写循环（reactor 定时器）：按节流间隔请求状态，并从队列取出请求发送（失败则重新入队）。"""
         if not self._connected:
             return eventtime + 0.05
         now = eventtime
@@ -763,6 +776,7 @@ class SolisAce:
         return eventtime + 0.05
 
     def _request_status(self):
+        """按节流间隔（停车中 0.2s / 空闲 1.0s）发送 get_status 请求并更新状态缓存。"""
         def status_callback(response):
             if 'result' in response:
                 self._info.update(response['result'])
@@ -777,6 +791,7 @@ class SolisAce:
                 self.logger.info(f"Status request error: {str(e)}")
 
     def _handle_response(self, response: dict):
+        """处理设备响应：派发对应回调、更新状态缓存，并在传统停车中按 feed_assist_count 是否稳定判定到位/失败。"""
         if 'id' in response:
             callback = self._callback_map.pop(response['id'], None)
             if callback:
@@ -859,6 +874,8 @@ class SolisAce:
                             self.dwell(0.7, lambda: setattr(self, '_dwell_scheduled', False))
 
     def _complete_parking(self):
+        """停车成功收尾：停止 feed_assist 并清理所有停车标志与定时器引用。
+        注意：POST 换色宏不在此执行，统一由 cmd_ACE_CHANGE_TOOL 调用（见 F1 修复）。"""
         if not self._park_in_progress:
             return
         self.logger.info(f"Parking completed for slot {self._park_index}")
@@ -961,6 +978,7 @@ class SolisAce:
         self._connect()
 
     def _reset_connection(self):
+        """重置连接（带重连次数上限）：超限则标记连接丢失并通知用户，否则断开后重连。"""
         # 在断开连接时也检查尝试次数限制
         if self._connection_lost:
             return  # 已超过限额
@@ -982,6 +1000,7 @@ class SolisAce:
         self._connect()
 
     def cmd_ACE_STATUS(self, gcmd):
+        """ACE_STATUS：请求最新设备状态并格式化输出到控制台。"""
         try:
             # 输出前请求最新状态
             def status_callback(response):
@@ -1122,6 +1141,7 @@ class SolisAce:
             gcmd.respond_raw(f"Error outputting status: {str(e)}")
 
     def cmd_ACE_DEBUG(self, gcmd):
+        """ACE_DEBUG：直接向设备发送任意 RPC 方法（调试用）；get_status 额外附加耗材传感器状态。"""
         method = gcmd.get('METHOD')
         params = gcmd.get('PARAMS', '{}')
         try:
@@ -1161,8 +1181,9 @@ class SolisAce:
             return
 
     def cmd_ACE_FILAMENT_INFO(self, gcmd):
+        """ACE_FILAMENT_INFO：查询指定槽位的耗材信息（RFID/品牌/类型/温度等）。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
-        
+
         # 验证INDEX并转换真实料槽
         real_slot, error = self._validate_index_for_operation(index, "ACE_FILAMENT_INFO")
         if error:
@@ -1203,6 +1224,7 @@ class SolisAce:
             gcmd.respond_info("No filament sensor configured")
  
     def cmd_ACE_START_DRYING(self, gcmd):
+        """ACE_START_DRYING：按 TEMP（温度）与 DURATION（分钟）启动烘干。"""
         temperature = gcmd.get_int('TEMP', minval=20, maxval=self.max_dryer_temperature)
         duration = gcmd.get_int('DURATION', 240, minval=1)
 
@@ -1221,6 +1243,7 @@ class SolisAce:
         }, callback)
  
     def cmd_ACE_STOP_DRYING(self, gcmd):
+        """ACE_STOP_DRYING：停止烘干。"""
         def callback(response):
             if response.get('code', 0) != 0:
                 gcmd.respond_raw(f"ACE Error: {response.get('msg', 'Unknown error')}")
@@ -1229,8 +1252,9 @@ class SolisAce:
         self.send_request({"method": "drying_stop"}, callback)
  
     def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
+        """ACE_ENABLE_FEED_ASSIST：对指定槽位启用送料辅助。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
-        
+
         # 验证 INDEX 并转换为真实料槽
         real_slot, error = self._validate_index_for_operation(index, "ACE_ENABLE_FEED_ASSIST")
         if error:
@@ -1247,6 +1271,7 @@ class SolisAce:
         self.send_request({"method": "start_feed_assist", "params": {"index": real_slot}}, callback)
  
     def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
+        """ACE_DISABLE_FEED_ASSIST：对指定槽位停用送料辅助（默认用当前送料辅助槽位）。"""
         index = gcmd.get_int('INDEX', self._feed_assist_index, minval=0, maxval=3)
         
         # 验证 INDEX 并转换为真实料槽
@@ -1265,6 +1290,7 @@ class SolisAce:
         self.send_request({"method": "stop_feed_assist", "params": {"index": real_slot}}, callback)
  
     def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
+        """ACE_PARK_TO_TOOLHEAD：将指定槽位耗材停泊到打印头（校验槽位就绪后调用 _park_to_toolhead）。"""
         if self._park_in_progress:
             gcmd.respond_raw("Already parking to toolhead")
             return
@@ -1286,6 +1312,7 @@ class SolisAce:
         self._park_to_toolhead(real_slot)
  
     def cmd_ACE_FEED(self, gcmd):
+        """ACE_FEED：按 LENGTH（mm）与 SPEED（mm/s）向指定槽位送料。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         length = gcmd.get_int('LENGTH', minval=1)
         speed = gcmd.get_int('SPEED', self.feed_speed, minval=1)
@@ -1306,6 +1333,7 @@ class SolisAce:
         self.dwell((length / speed) + 0.1, lambda: None)
  
     def cmd_ACE_UPDATE_FEEDING_SPEED(self, gcmd):
+        """ACE_UPDATE_FEEDING_SPEED：运行中更新指定槽位的送料速度。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         speed = gcmd.get_int('SPEED', self.feed_speed, minval=1)
         
@@ -1325,6 +1353,7 @@ class SolisAce:
         self.dwell(0.5, lambda: None)
  
     def cmd_ACE_STOP_FEED(self, gcmd):
+        """ACE_STOP_FEED：停止指定槽位送料。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         
         # 验证INDEX并转换为真实料槽
@@ -1342,6 +1371,7 @@ class SolisAce:
         self.dwell(0.5, lambda: None)
  
     def cmd_ACE_RETRACT(self, gcmd):
+        """ACE_RETRACT：按 LENGTH/SPEED/MODE 回抽指定槽位耗材（MODE：0 普通，1 增强）。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         length = gcmd.get_int('LENGTH', minval=1)
         speed = gcmd.get_int('SPEED', self.retract_speed, minval=1)
@@ -1364,6 +1394,7 @@ class SolisAce:
         self.dwell((length / speed) + 0.1, lambda: None)
  
     def cmd_ACE_UPDATE_RETRACT_SPEED(self, gcmd):
+        """ACE_UPDATE_RETRACT_SPEED：运行中更新指定槽位的回抽速度。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         speed = gcmd.get_int('SPEED', self.retract_speed, minval=1)
         
@@ -1383,6 +1414,7 @@ class SolisAce:
         self.dwell(0.5, lambda: None)
  
     def cmd_ACE_STOP_RETRACT(self, gcmd):
+        """ACE_STOP_RETRACT：停止指定槽位回抽。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
         
         # 验证INDEX并转换为真实料槽
@@ -2106,6 +2138,8 @@ class SolisAce:
         }, lambda r: None)
 
     def _park_to_toolhead(self, index: int):
+        """停泊调度：按 aggressive_parking 与传感器配置选择停车算法
+        （激进+传感器→sensor_based；激进+无传感器→distance_based；否则传统 feed_assist）。"""
         # 在调用任何方法之前设置停车标志,以防止数据竞争
         self._park_in_progress = True
         self._park_error = False
@@ -2144,6 +2178,8 @@ class SolisAce:
             self.send_request({"method": "start_feed_assist", "params": {"index": index}}, callback)
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
+        """ACE_CHANGE_TOOL：完整换色流程——校验目标槽 → PRE 宏(切刀) → 卸旧料(同步/简单回退)
+        → 停泊新料到喷嘴 → POST 宏(冲刷)。TOOL=-1 表示仅卸载当前耗材。"""
         tool = gcmd.get_int('TOOL', minval=-1, maxval=3)
         was = self.variables.get('ace_current_index', -1)
 
@@ -2965,6 +3001,7 @@ class TemperatureACE:
     """
 
     def __init__(self, config):
+        """温度传感器初始化：注册为 Klipper 对象、建立采样定时器与 connect/ready 事件处理。"""
         self.printer = config.get_printer()
         self.reactor = self.printer.get_reactor()
         self.name = config.get_name().split()[-1]
@@ -3110,6 +3147,7 @@ class TemperatureACE:
 
 
 def load_config(config):
+    """Klipper 模块入口：注册 temperature_ace 传感器工厂，并返回 SolisAce 主对象。"""
     # 注册 temperature_ace 传感器工厂（随 [ace] 一并加载，无需单独的 [temperature_ace] 段）
     pheaters = config.get_printer().load_object(config, "heaters")
     pheaters.add_sensor_factory("temperature_ace", TemperatureACE)
