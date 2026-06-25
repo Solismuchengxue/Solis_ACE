@@ -22,6 +22,11 @@ class SolisAce:
     提供自动换 filament 设备(ACE)的管理功能
     支持最多4个耗材料槽, 具备干燥、送料和回抽耗材的功能
     """
+
+    # ==================================================================
+    # ① 初始化与生命周期
+    # ==================================================================
+
     def __init__(self, config):
         """SolisAce 主模块初始化：读取配置参数、初始化状态、注册 G-code 命令与事件处理，并启动设备连接。"""
         self.printer = config.get_printer()
@@ -218,176 +223,6 @@ class SolisAce:
             } for i in range(4)]
         }
 
-    def _init_slot_mapping(self):
-        """
-        从变量初始化索引到料槽的映射.
-        如果变量不存在,则设置默认值(0→0, 1→1, 2→2, 3→3).
-        """
-        for i in range(4):
-            var_name = f'ace_index{i}_to_slot'
-            slot_value = self.variables.get(var_name, None)
-            
-            if slot_value is None:
-                # 变量不存在,使用默认值创建
-                self.index_to_slot[i] = i
-                self._save_variable(var_name, i)
-                self.logger.info(f"Slot mapping: initialized {var_name} = {i}")
-            else:
-                # 变量存在,验证并使用其值
-                try:
-                    slot_int = int(slot_value)
-                    if 0 <= slot_int <= 3:
-                        self.index_to_slot[i] = slot_int
-                        self.logger.info(f"Slot mapping: loaded {var_name} = {slot_int}")
-                    else:
-                        # 值超出范围,重置为默认值
-                        self.logger.warning(f"Slot mapping: {var_name} = {slot_value} out of range (0-3), resetting to {i}")
-                        self.index_to_slot[i] = i
-                        self._save_variable(var_name, i)
-                except (ValueError, TypeError):
-                    # 转换错误,重置为默认值
-                    self.logger.warning(f"Slot mapping: {var_name} = {slot_value} invalid, resetting to {i}")
-                    self.index_to_slot[i] = i
-                    self._save_variable(var_name, i)
-        
-        self.logger.info(f"Slot mapping initialized: {self.index_to_slot}")
-
-    def _get_real_slot(self, index: int) -> int:
-        """
-        将索引(来自Klipper)转换为设备的真实料槽.
-        
-        :param index: 来自Klipper的索引(0-3)
-        :return: 设备的真实料槽(0-3)
-        """
-        if 0 <= index <= 3:
-            return self.index_to_slot[index]
-        return index
-
-    def _set_slot_mapping(self, index: int, slot: int) -> bool:
-        """
-        设置索引到料槽的映射.
-        
-        :param index: 索引(0-3)
-        :param slot: 料槽(0-3)
-        :return: 成功返回True, 失败返回False
-        """
-        if not (0 <= index <= 3):
-            return False
-        if not (0 <= slot <= 3):
-            return False
-        
-        self.index_to_slot[index] = slot
-        var_name = f'ace_index{index}_to_slot'
-        self._save_variable(var_name, slot)
-        self.logger.info(f"Slot mapping updated: index {index} → slot {slot}")
-        return True
-
-    def _reset_slot_mapping(self):
-        """
-        将料槽映射重置为默认值(0→0, 1→1, 2→2, 3→3).
-        """
-        for i in range(4):
-            self.index_to_slot[i] = i
-            var_name = f'ace_index{i}_to_slot'
-            self._save_variable(var_name, i)
-        self.logger.info("Slot mapping reset to defaults: [0, 1, 2, 3]")
-
-    def _validate_index(self, index: int) -> tuple:
-        """
-        验证INDEX并转换为真实料槽.
-        
-        :param index: 来自Klipper的索引(0-3)
-        :return: 元组(real_slot, error_message)
-                 - real_slot: 如果有效则为设备的真实料槽(0-3),否则为 -1
-                 - error_message: 如果INDEX无效则为错误消息, 否则为None
-        """
-        # 检查INDEX范围
-        if not isinstance(index, int):
-            return -1, f"INDEX must be integer, got {type(index).__name__}"
-        
-        if index < 0 or index > 3:
-            return -1, f"INDEX {index} out of range (must be 0-3)"
-        
-        # 通过映射转换
-        real_slot = self.index_to_slot[index]
-        
-        self.logger.debug(f"INDEX validation: {index} → Slot {real_slot}")
-        return real_slot, None
-
-    def _validate_slot_status(self, real_slot: int, required_status: str = 'ready') -> tuple:
-        """
-        检查料槽状态.
-
-        :param real_slot: 设备的真实料槽(0-3)
-        :param required_status: 所需状态('ready', 'empty', etc.)
-        :return: 元组(is_valid, error_message)
-                 - is_valid: 如果料槽具有所需状态则为True
-                 - error_message: 如果状态不匹配则为错误消息
-        """
-        # 检查连接状态
-        if not self._connected:
-            return False, "ACE device not connected"
-        
-        # 检查料槽范围
-        if real_slot < 0 or real_slot > 3:
-            return False, f"Invalid slot {real_slot} (must be 0-3)"
-        
-        # 获取当前料槽状态
-        try:
-            slots = self._info.get('slots', [])
-            if real_slot >= len(slots):
-                return False, f"Slot {real_slot} not found in device status"
-            
-            slot_info = slots[real_slot]
-            current_status = slot_info.get('status', 'unknown')
-            
-            if current_status != required_status:
-                return False, f"Slot {real_slot} status is '{current_status}', expected '{required_status}'"
-            
-            return True, None
-            
-        except Exception as e:
-            self.logger.error(f"Error checking slot {real_slot} status: {str(e)}")
-            return False, f"Error checking slot status: {str(e)}"
-
-    def _validate_index_for_operation(self, index: int, operation_name: str = "operation") -> tuple:
-        """
-        对操作进行INDEX的综合验证（检查INDEX范围 + 设备连接状态）.
-
-        :param index: 来自Klipper的索引(0-3)
-        :param operation_name: 用于错误消息的操作名称
-        :return: 元组(real_slot, error_message)
-                 - real_slot: 如果有效则为设备的真实料槽, 否则为None
-                 - error_message: 如果验证失败则为错误消息, 否则为None
-        """
-        # 验证INDEX
-        real_slot, error = self._validate_index(index)
-        if error:
-            return None, error
-        
-        # 检查设备连接状态
-        if not self._connected:
-            return None, "ACE device not connected"
-        
-        return real_slot, None
-
-    def _is_slot_ready(self, index: int) -> bool:
-        """
-        按索引检查料槽是否就绪.
-        
-        :param index: 料槽索引(0-3)
-        :return: 如果料槽就绪则返回True, 否则返回False
-        """
-        try:
-            slots = self._info.get('slots', [])
-            if index < 0 or index >= len(slots):
-                return False
-            slot_info = slots[index]
-            return slot_info.get('status', 'unknown') == 'ready'
-        except Exception as e:
-            self.logger.error(f"Error checking slot {index} readiness: {str(e)}")
-            return False
-
     def _register_handlers(self):
         """
         注册打印机事件处理程序
@@ -431,6 +266,35 @@ class SolisAce:
         ]
         for name, func, desc in commands:
             self.gcode.register_command(name, func, desc=desc)
+
+    def _handle_ready(self):
+        """Klipper ready 事件：获取 toolhead 引用并初始化料槽映射。"""
+        self.toolhead = self.printer.lookup_object('toolhead')
+        if self.toolhead is None:
+            raise self.printer.config_error("Toolhead not found in SolisAce module")
+        
+        # 初始化料槽映射
+        self._init_slot_mapping()
+
+    def _handle_disconnect(self):
+        """Klipper disconnect 事件：打印中则触发暂停宏，然后断开设备连接。"""
+        # 当klipper断开连接时,重置手动断开连接标记,以便重启后自动重连功能能够正常工作
+        self._manually_disconnected = False
+
+        # 检查打印状态并在需要时调用暂停
+        printer_state = self._get_printer_state()
+        if printer_state == 'printing':
+            self.logger.info(f"Klipper disconnect detected during printing, triggering {self.pause_macro_name}")
+            try:
+                self.gcode.run_script_from_command(self.pause_macro_name)
+            except Exception as e:
+                self.logger.error(f"Error triggering {self.pause_macro_name} during klipper disconnect: {str(e)}")
+
+        self._disconnect()
+
+    # ==================================================================
+    # ② 连接管理
+    # ==================================================================
 
     def _connect_check(self, eventtime):
         """连接看门狗（reactor 定时器，每秒一次）：若未连接且非手动断开则尝试重连。"""
@@ -559,92 +423,140 @@ class SolisAce:
         
         self.logger.info("ACE device disconnected successfully")
 
-    def _save_variable(self, name: str, value):
-        """如果save_variables模块可用, 则安全地保存变量"""
-        self.variables[name] = value
-        try:
-            self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE={name} VALUE={value}')
-        except Exception as e:
-            # save_variables 不可用或保存时出错
-            self.logger.debug(f"Could not save variable {name}: {e}")
-
-    def _handle_ready(self):
-        """Klipper ready 事件：获取 toolhead 引用并初始化料槽映射。"""
-        self.toolhead = self.printer.lookup_object('toolhead')
-        if self.toolhead is None:
-            raise self.printer.config_error("Toolhead not found in SolisAce module")
+    def _reconnect(self):
+        """串口读写出错时触发，自动重连；超过最大次数后标记 _connection_lost 并通知用户。"""
+        if self._connection_lost:
+            return  # 已超过最大重连次数，停止重试
+            
+        self._reconnect_attempts += 1
+        if self._reconnect_attempts > self._max_reconnect_attempts:
+            # 尝试次数超出限制
+            self._connection_lost = True
+            self._notify_connection_lost()
+            return
         
-        # 初始化料槽映射
-        self._init_slot_mapping()
-
-    def _handle_disconnect(self):
-        """Klipper disconnect 事件：打印中则触发暂停宏，然后断开设备连接。"""
-        # 当klipper断开连接时,重置手动断开连接标记,以便重启后自动重连功能能够正常工作
+        # 通知重新连接尝试
+        self.logger.info(f"Attempting to reconnect to ACE (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
+        
+        # 在自动重连期间,重置手动断开连接标志
         self._manually_disconnected = False
-
-        # 检查打印状态并在需要时调用暂停
-        printer_state = self._get_printer_state()
-        if printer_state == 'printing':
-            self.logger.info(f"Klipper disconnect detected during printing, triggering {self.pause_macro_name}")
-            try:
-                self.gcode.run_script_from_command(self.pause_macro_name)
-            except Exception as e:
-                self.logger.error(f"Error triggering {self.pause_macro_name} during klipper disconnect: {str(e)}")
-
         self._disconnect()
+        self.dwell(1.0, lambda: None)
+        self._connect()
 
-    def get_status(self, eventtime):
-        """通过 query_objects 返回 Moonraker API 的状态"""
-        # Klipper 在通过 query_objects 请求时自动调用此方法
-        # Moonraker 自动将结果包装在模块名称的键中('ace')
+    def _reset_connection(self):
+        """重置连接（带重连次数上限）：超限则标记连接丢失并通知用户，否则断开后重连。"""
+        # 在断开连接时也检查尝试次数限制
+        if self._connection_lost:
+            return  # 已超过限额
         
-        # 获取烘干机数据
-        dryer_data = self._info.get('dryer', {}) or self._info.get('dryer_status', {})
+        self._reconnect_attempts += 1
         
-        # 标准化时间:如果需要,将秒转换为分钟
-        if isinstance(dryer_data, dict):
-            dryer_normalized = dryer_data.copy()
+        if self._reconnect_attempts > self._max_reconnect_attempts:
+            # 尝试次数超出限制
+            self._connection_lost = True
+            self._notify_connection_lost()
+            return
+        
+        self.logger.info(f"Resetting ACE connection (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
+        
+        # 在连接重置过程中,重置手动断开连接标志
+        self._manually_disconnected = False
+        self._disconnect()
+        self.dwell(1.0, lambda: None)
+        self._connect()
+
+    def _notify_connection_lost(self):
+        """通知用户连接丢失并在打印时调用暂停"""
+        self.gcode.respond_raw("ACE: CRITICAL - Connection lost after maximum attempts")
+        self._pause_print_if_needed()
+
+    def cmd_ACE_CONNECT(self, gcmd):
+        """用于连接设备的G代码指令"""
+        try:
+            if self._connected:
+                gcmd.respond_info("ACE device is already connected")
+            else:
+                self._manually_disconnected = False  # 重置手动断开标志
+                
+                # 尝试立即连接
+                success = self._connect()
+                
+                if success:
+                    gcmd.respond_info("ACE device connected successfully")
+                    self.logger.info("Device manually connected via ACE_CONNECT command")
+                else:
+                    gcmd.respond_raw("Failed to connect to ACE device")
+                    self.logger.error("Manual connection attempt failed")
+        except Exception as e:
+            self.logger.error(f"Error during manual connect: {str(e)}")
+            gcmd.respond_raw(f"Error connecting: {str(e)}")
+
+    def cmd_ACE_DISCONNECT(self, gcmd):
+        """强制断开与设备连接的G代码指令"""
+        try:
+            if self._connected:
+                self._manually_disconnected = True  # 标记为手动断开
+                self._disconnect()
+                gcmd.respond_info("ACE device disconnected successfully")
+                self.logger.info("Device manually disconnected via ACE_DISCONNECT command")
+            else:
+                gcmd.respond_info("ACE device is already disconnected")
+        except Exception as e:
+            self.logger.error(f"Error during forced disconnect: {str(e)}")
+            gcmd.respond_raw(f"Error disconnecting: {str(e)}")
+
+    def cmd_ACE_RECONNECT(self, gcmd):
+        """用于手动重置连接并清除错误标志的G代码指令"""
+        try:
+            self.logger.info("Manual reconnection requested via ACE_RECONNECT")
+            # 重置错误标志
+            self._connection_lost = False
+            self._reconnect_attempts = 0
             
-            # remain_time 始终以秒为单位传入 - 转换为分钟
-            remain_time_raw = dryer_normalized.get('remain_time', 0)
-            if remain_time_raw > 0:
-                dryer_normalized['remain_time'] = remain_time_raw / 60  # 保留小数部分用于秒
+            # 尝试连接
+            self._manually_disconnected = False
+            self._disconnect()
+            self.dwell(1.0, lambda: None)
             
-            # duration 始终以分钟为单位传入 - 保持不变
-            # (不做任何操作,已经是正确的格式)
-        else:
-            dryer_normalized = {}
-        
-        # 如果已配置,获取耗材传感器状态
-        filament_sensor_status = None
-        if self.filament_sensor:
-            try:
-                filament_sensor_status = self.filament_sensor.get_status(eventtime)
-            except Exception as e:
-                self.logger.warning(f"Error getting filament sensor status: {str(e)}")
-                filament_sensor_status = {"filament_detected": False, "enabled": False}
-        
-        return {
-            'status': self._info.get('status', 'unknown'),
-            'connection_state': 'connected' if self._connected else 'disconnected',
-            'current_index': self.variables.get('ace_current_index', -1),  # 添加这行
-            'model': self._info.get('model', ''),
-            'firmware': self._info.get('firmware', ''),
-            'boot_firmware': self._info.get('boot_firmware', ''),
-            'temp': self._info.get('temp', 0),
-            'fan_speed': self._info.get('fan_speed', 0),
-            'enable_rfid': self._info.get('enable_rfid', 0),
-            'feed_assist_count': self._info.get('feed_assist_count', 0),
-            'cont_assist_time': self._info.get('cont_assist_time', 0.0),
-            'feed_assist_slot': self._feed_assist_index,  # 已激活送料辅助的料槽索引(-1 = 已禁用)
-            'dryer': dryer_normalized,
-            'dryer_status': dryer_normalized,
-            'slots': self._info.get('slots', []),
-            'filament_sensor': filament_sensor_status,
-            'slot_mapping': self.index_to_slot.copy(),  # 索引到料槽的映射
-            'usb_port': self.serial_name.split('/')[-1] if self.serial_name else '',
-            'usb_path': self.serial_name or '',
-        }
+            success = self._connect()
+            if success:
+                gcmd.respond_info("ACE: Reconnection successful")
+            else:
+                gcmd.respond_raw("ACE: Reconnection failed, will retry automatically")
+        except Exception as e:
+            self.logger.error(f"Error during manual reconnect: {str(e)}")
+            gcmd.respond_raw(f"Error reconnecting: {str(e)}")
+
+    def cmd_ACE_CONNECTION_STATUS(self, gcmd):
+        """用于检查连接状态的G代码指令"""
+        try:
+            status = "connected" if self._connected else "disconnected"
+            gcmd.respond_info(f"ACE Connection Status: {status}")
+
+            if self._connected:
+                # 提供额外的连接详情
+                try:
+                    model = self._info.get('model', 'Unknown')
+                    firmware = self._info.get('firmware', 'Unknown')
+                    gcmd.respond_info(f"Device: {model}, Firmware: {firmware}")
+                except Exception:
+                    gcmd.respond_info("Device: connected (details unavailable)")
+            else:
+                gcmd.respond_info(f"Serial Port: {self.serial_name}")
+                gcmd.respond_info(f"Baud Rate: {self.baud}")
+            
+            # 额外的连接丢失状态信息
+            if self._connection_lost:
+                gcmd.respond_raw(f"ACE: Connection lost flag is set (attempts: {self._reconnect_attempts}/{self._max_reconnect_attempts})")
+                gcmd.respond_info("Try ACE_RECONNECT to reset the connection")
+        except Exception as e:
+            self.logger.error(f"Error checking connection status: {str(e)}")
+            gcmd.respond_raw(f"Error checking status: {str(e)}")
+
+    # ==================================================================
+    # ③ 协议与收发
+    # ==================================================================
 
     def _calc_crc(self, buffer: bytes) -> int:
         """
@@ -873,131 +785,62 @@ class SolisAce:
                             self._dwell_scheduled = True
                             self.dwell(0.7, lambda: setattr(self, '_dwell_scheduled', False))
 
-    def _complete_parking(self):
-        """停车成功收尾：停止 feed_assist 并清理所有停车标志与定时器引用。
-        注意：POST 换色宏不在此执行，统一由 cmd_ACE_CHANGE_TOOL 调用（见 F1 修复）。"""
-        if not self._park_in_progress:
-            return
-        self.logger.info(f"Parking completed for slot {self._park_index}")
-        
-        # 停止指定料槽的送料辅助
-        def stop_feed_assist_callback(response):
-            if response.get('code', 0) != 0:
-                self.logger.warning(f"Warning stopping feed assist after parking: {response.get('msg', 'Unknown error')}")
-            else:
-                self.logger.info(f"Feed assist stopped successfully after parking for slot {self._park_index}")
-        
-        self.send_request({
-            "method": "stop_feed_assist",
-            "params": {"index": self._park_index}
-        }, stop_feed_assist_callback)
-        
-        # POST 宏（_ACE_POST_TOOLCHANGE / _ACE_POST_INFINITYSPOOL）统一由
-        # cmd_ACE_CHANGE_TOOL 在等待停车完成后调用，此处不再执行：
-        #   - 避免每次换色冲刷跑两次（F1）
-        #   - 避免从 reader loop 上下文里跑宏（见 F4）
-        #   - cmd 用 Klipper 索引 TO={tool}，比此处真实槽 TO={_park_index} 更正确
-        self._park_in_progress = False
-        self._park_error = False  # 重置错误标志
-        self._park_is_toolchange = False
-        self._park_previous_tool = -1
-        self._park_index = -1
-        # 重置传感器停车标志
-        self._sensor_parking_active = False
-        self._sensor_parking_completed = False
-        # 清理计时器引用以防止泄漏
-        self._park_monitor_timer = None
-        self._sensor_monitor_timer = None
-        if self.disable_assist_after_toolchange:
-            self._feed_assist_index = -1
+    # ==================================================================
+    # ④ 状态与查询
+    # ==================================================================
 
-    def dwell(self, delay: float = 1.0, callback: Optional[Callable] = None):
-        """暂停执行,使用反应器"""
-        if delay <= 0:
-            if callback:
-                try:
-                    callback()
-                except Exception as e:
-                    self.logger.error(f"Error in dwell callback: {e}")
-            return
+    def get_status(self, eventtime):
+        """通过 query_objects 返回 Moonraker API 的状态"""
+        # Klipper 在通过 query_objects 请求时自动调用此方法
+        # Moonraker 自动将结果包装在模块名称的键中('ace')
         
-        def timer_handler(event_time):
-            if callback:
-                try:
-                    callback()
-                except Exception as e:
-                    self.logger.error(f"Error in dwell callback: {e}")
-            return self.reactor.NEVER
+        # 获取烘干机数据
+        dryer_data = self._info.get('dryer', {}) or self._info.get('dryer_status', {})
         
-        self.reactor.register_timer(timer_handler, self.reactor.monotonic() + delay)
-
-    def _get_printer_state(self):
-        """获取当前打印状态"""
-        eventtime = self.reactor.monotonic()
-        try:
-            print_stats = self.printer.lookup_object('print_stats')
-            ps_status = print_stats.get_status(eventtime)
-            return ps_status.get('state', 'unknown')
-        except Exception:
-            return 'unknown'
-        
-    def _pause_print_if_needed(self):
-        """如果打印机正在打印则调用暂停"""
-        printer_state = self._get_printer_state()
-        if printer_state == 'printing':
-            self.logger.info(f"Print in progress, triggering {self.pause_macro_name}")
-            try:
-                self.gcode.run_script_from_command(self.pause_macro_name)
-            except Exception as e:
-                self.logger.error(f"Error triggering {self.pause_macro_name}: {str(e)}")
-
-    def _notify_connection_lost(self):
-        """通知用户连接丢失并在打印时调用暂停"""
-        self.gcode.respond_raw("ACE: CRITICAL - Connection lost after maximum attempts")
-        self._pause_print_if_needed()
-
-    def _reconnect(self):
-        """串口读写出错时触发，自动重连；超过最大次数后标记 _connection_lost 并通知用户。"""
-        if self._connection_lost:
-            return  # 已超过最大重连次数，停止重试
+        # 标准化时间:如果需要,将秒转换为分钟
+        if isinstance(dryer_data, dict):
+            dryer_normalized = dryer_data.copy()
             
-        self._reconnect_attempts += 1
-        if self._reconnect_attempts > self._max_reconnect_attempts:
-            # 尝试次数超出限制
-            self._connection_lost = True
-            self._notify_connection_lost()
-            return
+            # remain_time 始终以秒为单位传入 - 转换为分钟
+            remain_time_raw = dryer_normalized.get('remain_time', 0)
+            if remain_time_raw > 0:
+                dryer_normalized['remain_time'] = remain_time_raw / 60  # 保留小数部分用于秒
+            
+            # duration 始终以分钟为单位传入 - 保持不变
+            # (不做任何操作,已经是正确的格式)
+        else:
+            dryer_normalized = {}
         
-        # 通知重新连接尝试
-        self.logger.info(f"Attempting to reconnect to ACE (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
+        # 如果已配置,获取耗材传感器状态
+        filament_sensor_status = None
+        if self.filament_sensor:
+            try:
+                filament_sensor_status = self.filament_sensor.get_status(eventtime)
+            except Exception as e:
+                self.logger.warning(f"Error getting filament sensor status: {str(e)}")
+                filament_sensor_status = {"filament_detected": False, "enabled": False}
         
-        # 在自动重连期间,重置手动断开连接标志
-        self._manually_disconnected = False
-        self._disconnect()
-        self.dwell(1.0, lambda: None)
-        self._connect()
-
-    def _reset_connection(self):
-        """重置连接（带重连次数上限）：超限则标记连接丢失并通知用户，否则断开后重连。"""
-        # 在断开连接时也检查尝试次数限制
-        if self._connection_lost:
-            return  # 已超过限额
-        
-        self._reconnect_attempts += 1
-        
-        if self._reconnect_attempts > self._max_reconnect_attempts:
-            # 尝试次数超出限制
-            self._connection_lost = True
-            self._notify_connection_lost()
-            return
-        
-        self.logger.info(f"Resetting ACE connection (attempt {self._reconnect_attempts}/{self._max_reconnect_attempts})")
-        
-        # 在连接重置过程中,重置手动断开连接标志
-        self._manually_disconnected = False
-        self._disconnect()
-        self.dwell(1.0, lambda: None)
-        self._connect()
+        return {
+            'status': self._info.get('status', 'unknown'),
+            'connection_state': 'connected' if self._connected else 'disconnected',
+            'current_index': self.variables.get('ace_current_index', -1),  # 添加这行
+            'model': self._info.get('model', ''),
+            'firmware': self._info.get('firmware', ''),
+            'boot_firmware': self._info.get('boot_firmware', ''),
+            'temp': self._info.get('temp', 0),
+            'fan_speed': self._info.get('fan_speed', 0),
+            'enable_rfid': self._info.get('enable_rfid', 0),
+            'feed_assist_count': self._info.get('feed_assist_count', 0),
+            'cont_assist_time': self._info.get('cont_assist_time', 0.0),
+            'feed_assist_slot': self._feed_assist_index,  # 已激活送料辅助的料槽索引(-1 = 已禁用)
+            'dryer': dryer_normalized,
+            'dryer_status': dryer_normalized,
+            'slots': self._info.get('slots', []),
+            'filament_sensor': filament_sensor_status,
+            'slot_mapping': self.index_to_slot.copy(),  # 索引到料槽的映射
+            'usb_port': self.serial_name.split('/')[-1] if self.serial_name else '',
+            'usb_path': self.serial_name or '',
+        }
 
     def cmd_ACE_STATUS(self, gcmd):
         """ACE_STATUS：请求最新设备状态并格式化输出到控制台。"""
@@ -1018,7 +861,7 @@ class SolisAce:
         except Exception as e:
             self.logger.info(f"Status command error: {str(e)}")
             gcmd.respond_raw(f"Error retrieving status: {str(e)}")
-    
+
     def _output_status(self, gcmd):
         """输出ACE状态(在获取数据后调用)"""
         try:
@@ -1201,7 +1044,7 @@ class SolisAce:
         except Exception as e:
             self.logger.info(f"Filament info error: {str(e)}")
             self.gcode.respond_info('Error: ' + str(e))
- 
+
     def cmd_ACE_CHECK_FILAMENT_SENSOR(self, gcmd):
         """检查耗材传感器状态的指令"""
         if self.filament_sensor:
@@ -1222,7 +1065,332 @@ class SolisAce:
                 gcmd.respond_info(f"Error checking filament sensor: {str(e)}")
         else:
             gcmd.respond_info("No filament sensor configured")
- 
+
+    # ==================================================================
+    # ⑤ 料槽映射与索引校验
+    # ==================================================================
+
+    def _init_slot_mapping(self):
+        """
+        从变量初始化索引到料槽的映射.
+        如果变量不存在,则设置默认值(0→0, 1→1, 2→2, 3→3).
+        """
+        for i in range(4):
+            var_name = f'ace_index{i}_to_slot'
+            slot_value = self.variables.get(var_name, None)
+            
+            if slot_value is None:
+                # 变量不存在,使用默认值创建
+                self.index_to_slot[i] = i
+                self._save_variable(var_name, i)
+                self.logger.info(f"Slot mapping: initialized {var_name} = {i}")
+            else:
+                # 变量存在,验证并使用其值
+                try:
+                    slot_int = int(slot_value)
+                    if 0 <= slot_int <= 3:
+                        self.index_to_slot[i] = slot_int
+                        self.logger.info(f"Slot mapping: loaded {var_name} = {slot_int}")
+                    else:
+                        # 值超出范围,重置为默认值
+                        self.logger.warning(f"Slot mapping: {var_name} = {slot_value} out of range (0-3), resetting to {i}")
+                        self.index_to_slot[i] = i
+                        self._save_variable(var_name, i)
+                except (ValueError, TypeError):
+                    # 转换错误,重置为默认值
+                    self.logger.warning(f"Slot mapping: {var_name} = {slot_value} invalid, resetting to {i}")
+                    self.index_to_slot[i] = i
+                    self._save_variable(var_name, i)
+        
+        self.logger.info(f"Slot mapping initialized: {self.index_to_slot}")
+
+    def _get_real_slot(self, index: int) -> int:
+        """
+        将索引(来自Klipper)转换为设备的真实料槽.
+        
+        :param index: 来自Klipper的索引(0-3)
+        :return: 设备的真实料槽(0-3)
+        """
+        if 0 <= index <= 3:
+            return self.index_to_slot[index]
+        return index
+
+    def _set_slot_mapping(self, index: int, slot: int) -> bool:
+        """
+        设置索引到料槽的映射.
+        
+        :param index: 索引(0-3)
+        :param slot: 料槽(0-3)
+        :return: 成功返回True, 失败返回False
+        """
+        if not (0 <= index <= 3):
+            return False
+        if not (0 <= slot <= 3):
+            return False
+        
+        self.index_to_slot[index] = slot
+        var_name = f'ace_index{index}_to_slot'
+        self._save_variable(var_name, slot)
+        self.logger.info(f"Slot mapping updated: index {index} → slot {slot}")
+        return True
+
+    def _reset_slot_mapping(self):
+        """
+        将料槽映射重置为默认值(0→0, 1→1, 2→2, 3→3).
+        """
+        for i in range(4):
+            self.index_to_slot[i] = i
+            var_name = f'ace_index{i}_to_slot'
+            self._save_variable(var_name, i)
+        self.logger.info("Slot mapping reset to defaults: [0, 1, 2, 3]")
+
+    def _validate_index(self, index: int) -> tuple:
+        """
+        验证INDEX并转换为真实料槽.
+        
+        :param index: 来自Klipper的索引(0-3)
+        :return: 元组(real_slot, error_message)
+                 - real_slot: 如果有效则为设备的真实料槽(0-3),否则为 -1
+                 - error_message: 如果INDEX无效则为错误消息, 否则为None
+        """
+        # 检查INDEX范围
+        if not isinstance(index, int):
+            return -1, f"INDEX must be integer, got {type(index).__name__}"
+        
+        if index < 0 or index > 3:
+            return -1, f"INDEX {index} out of range (must be 0-3)"
+        
+        # 通过映射转换
+        real_slot = self.index_to_slot[index]
+        
+        self.logger.debug(f"INDEX validation: {index} → Slot {real_slot}")
+        return real_slot, None
+
+    def _validate_slot_status(self, real_slot: int, required_status: str = 'ready') -> tuple:
+        """
+        检查料槽状态.
+
+        :param real_slot: 设备的真实料槽(0-3)
+        :param required_status: 所需状态('ready', 'empty', etc.)
+        :return: 元组(is_valid, error_message)
+                 - is_valid: 如果料槽具有所需状态则为True
+                 - error_message: 如果状态不匹配则为错误消息
+        """
+        # 检查连接状态
+        if not self._connected:
+            return False, "ACE device not connected"
+        
+        # 检查料槽范围
+        if real_slot < 0 or real_slot > 3:
+            return False, f"Invalid slot {real_slot} (must be 0-3)"
+        
+        # 获取当前料槽状态
+        try:
+            slots = self._info.get('slots', [])
+            if real_slot >= len(slots):
+                return False, f"Slot {real_slot} not found in device status"
+            
+            slot_info = slots[real_slot]
+            current_status = slot_info.get('status', 'unknown')
+            
+            if current_status != required_status:
+                return False, f"Slot {real_slot} status is '{current_status}', expected '{required_status}'"
+            
+            return True, None
+            
+        except Exception as e:
+            self.logger.error(f"Error checking slot {real_slot} status: {str(e)}")
+            return False, f"Error checking slot status: {str(e)}"
+
+    def _validate_index_for_operation(self, index: int, operation_name: str = "operation") -> tuple:
+        """
+        对操作进行INDEX的综合验证（检查INDEX范围 + 设备连接状态）.
+
+        :param index: 来自Klipper的索引(0-3)
+        :param operation_name: 用于错误消息的操作名称
+        :return: 元组(real_slot, error_message)
+                 - real_slot: 如果有效则为设备的真实料槽, 否则为None
+                 - error_message: 如果验证失败则为错误消息, 否则为None
+        """
+        # 验证INDEX
+        real_slot, error = self._validate_index(index)
+        if error:
+            return None, error
+        
+        # 检查设备连接状态
+        if not self._connected:
+            return None, "ACE device not connected"
+        
+        return real_slot, None
+
+    def _is_slot_ready(self, index: int) -> bool:
+        """
+        按索引检查料槽是否就绪.
+        
+        :param index: 料槽索引(0-3)
+        :return: 如果料槽就绪则返回True, 否则返回False
+        """
+        try:
+            slots = self._info.get('slots', [])
+            if index < 0 or index >= len(slots):
+                return False
+            slot_info = slots[index]
+            return slot_info.get('status', 'unknown') == 'ready'
+        except Exception as e:
+            self.logger.error(f"Error checking slot {index} readiness: {str(e)}")
+            return False
+
+    def cmd_ACE_GET_SLOTMAPPING(self, gcmd):
+        """
+        获取当前的索引到料槽映射.
+        
+        输出格式
+        Slot Mapping:
+          Index 0 → Slot X
+          Index 1 → Slot X
+          Index 2 → Slot X
+          Index 3 → Slot X
+        """
+        output = ["=== Slot Mapping ==="]
+        for i in range(4):
+            output.append(f"  Index {i} → Slot {self.index_to_slot[i]}")
+        output.append("")
+        output.append(f"Current mapping: {self.index_to_slot}")
+        gcmd.respond_info("\n".join(output))
+
+    def cmd_ACE_SET_SLOTMAPPING(self, gcmd):
+        """
+        设置索引到料槽的映射.
+        
+        参数 / Parameters:
+          INDEX=0-3  - 来自Klipper的索引(T0-T3) / Index from Klipper(T0-T3)
+          SLOT=0-3   - 设备的真实料槽 / Real device slot
+        """
+        index = gcmd.get_int('INDEX', minval=0, maxval=3)
+        slot = gcmd.get_int('SLOT', minval=0, maxval=3)
+        
+        # 验证INDEX
+        real_index, error = self._validate_index(index)
+        if error:
+            gcmd.respond_raw(f"ACE Error: {error}")
+            return
+        
+        # 验证SLOT
+        if slot < 0 or slot > 3:
+            gcmd.respond_raw(f"ACE Error: SLOT {slot} out of range(must be 0-3)")
+            return
+        
+        old_slot = self.index_to_slot[index]
+        
+        if self._set_slot_mapping(index, slot):
+            gcmd.respond_info(f"Slot mapping updated: Index {index} → Slot {slot} (was Slot {old_slot})")
+            gcmd.respond_info(f"Current mapping: {self.index_to_slot}")
+        else:
+            gcmd.respond_raw(f"Error: Failed to set slot mapping for index {index}")
+
+    def cmd_ACE_RESET_SLOTMAPPING(self, gcmd):
+        """
+        将料槽映射重置为默认值.
+        将料槽映射重置为默认值(0→0,1→1,2→2,3→3).
+        """
+        old_mapping = self.index_to_slot.copy()
+        self._reset_slot_mapping()
+        gcmd.respond_info("Slot mapping reset to defaults")
+        gcmd.respond_info(f"  Old mapping: {old_mapping}")
+        gcmd.respond_info(f"  New mapping: {self.index_to_slot}")
+
+    def cmd_ACE_GET_CURRENT_INDEX(self, gcmd):
+        """
+        获取当前工具索引值.
+        此命令输出ace_current_index变量的当前值.
+        """
+        current_index = self.variables.get('ace_current_index', -1)
+        gcmd.respond_info(f"Current tool index: {current_index}")
+
+    def cmd_ACE_SET_CURRENT_INDEX(self, gcmd):
+        """
+        设置当前工具索引值.
+        此命令允许用户在 -1 到 3 的范围内设置任意索引.
+        当打印机遇到错误且在耗材更换过程中未记录正确索引时非常有用.
+        
+        Parameters:
+          INDEX: The index to set(-1 to 3)
+        """
+        new_index = gcmd.get_int('INDEX', minval=-1, maxval=3)
+        
+        old_index = self.variables.get('ace_current_index', -1)
+        
+        # 更新变量
+        self.variables['ace_current_index'] = new_index
+        self._save_variable('ace_current_index', new_index)
+        
+        gcmd.respond_info(f"Tool index changed from {old_index} to {new_index}")
+
+    def cmd_ACE_SET_SLOT(self, gcmd):
+        """设置料槽耗材元数据（颜色/材料/温度/预设名）。
+        用法: ACE_SET_SLOT INDEX=<0-3> COLOR="R,G,B" MATERIAL=<name> TEMP=<°C> [FILAMENT_SETTINGS_ID=<name>]
+        也接受 T=<0-3> 替代 INDEX（T 为 Klipper 工具编号，会映射到物理料槽）。
+        """
+        index = gcmd.get_int('INDEX', None, minval=0, maxval=3)
+        tool = gcmd.get_int('T', None, minval=0, maxval=3)
+        gcmd.get_int('INSTANCE', 0)  # 接受但忽略（单实例模式）
+
+        if index is not None:
+            slot_idx = index  # 直接物理料槽索引
+        elif tool is not None:
+            slot_idx = self.index_to_slot[tool] if 0 <= tool < len(self.index_to_slot) else tool
+        else:
+            gcmd.respond_raw("ACE Error: INDEX or T parameter required")
+            return
+
+        color_str = gcmd.get('COLOR', '0,0,0')
+        material = gcmd.get('MATERIAL', '')
+        temp = gcmd.get_float('TEMP', 0.0, minval=0, maxval=400)
+        filament_id = gcmd.get('FILAMENT_SETTINGS_ID', '')
+
+        rgb = [0, 0, 0]
+        try:
+            parts = [int(x.strip()) for x in color_str.split(',')]
+            if len(parts) >= 3:
+                rgb = [max(0, min(255, p)) for p in parts[:3]]
+        except (ValueError, IndexError):
+            self.logger.warning(f"ACE_SET_SLOT: invalid COLOR '{color_str}', using [0,0,0]")
+
+        # 更新内存中的料槽状态（立即反映到 get_status / Moonraker API）
+        slots = self._info.get('slots', [])
+        for slot in slots:
+            if slot.get('index') == slot_idx:
+                slot['color'] = rgb
+                if material:
+                    slot['type'] = material
+                break
+
+        # 持久化数值字段（字符串字段依赖 in-memory self.variables）
+        self._save_variable(f'ace_slot{slot_idx}_r', rgb[0])
+        self._save_variable(f'ace_slot{slot_idx}_g', rgb[1])
+        self._save_variable(f'ace_slot{slot_idx}_b', rgb[2])
+        self._save_variable(f'ace_slot{slot_idx}_temp', int(temp))
+        if material:
+            self.variables[f'ace_slot{slot_idx}_material'] = material
+        if filament_id is not None:
+            self.variables[f'ace_slot{slot_idx}_filament_id'] = filament_id
+
+        gcmd.respond_info(
+            f"Slot {slot_idx} updated: material={material or '(unchanged)'}, "
+            f"color=RGB({rgb[0]},{rgb[1]},{rgb[2]}), temp={int(temp)}°C"
+        )
+
+    def cmd_ACE_SAVE_INVENTORY(self, gcmd):
+        """保存耗材库存快照。
+        槽位数值数据已在 ACE_SET_SLOT 中实时保存，此命令仅为 web UI 提供成功确认。
+        """
+        gcmd.get_int('INSTANCE', 0)  # 接受但忽略
+        gcmd.respond_info("Inventory saved")
+
+    # ==================================================================
+    # ⑥ 烘干
+    # ==================================================================
+
     def cmd_ACE_START_DRYING(self, gcmd):
         """ACE_START_DRYING：按 TEMP（温度）与 DURATION（分钟）启动烘干。"""
         temperature = gcmd.get_int('TEMP', minval=20, maxval=self.max_dryer_temperature)
@@ -1241,7 +1409,7 @@ class SolisAce:
                 "duration": duration
             }
         }, callback)
- 
+
     def cmd_ACE_STOP_DRYING(self, gcmd):
         """ACE_STOP_DRYING：停止烘干。"""
         def callback(response):
@@ -1250,67 +1418,11 @@ class SolisAce:
             else:
                 gcmd.respond_info("Drying stopped")
         self.send_request({"method": "drying_stop"}, callback)
- 
-    def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
-        """ACE_ENABLE_FEED_ASSIST：对指定槽位启用送料辅助。"""
-        index = gcmd.get_int('INDEX', minval=0, maxval=3)
 
-        # 验证 INDEX 并转换为真实料槽
-        real_slot, error = self._validate_index_for_operation(index, "ACE_ENABLE_FEED_ASSIST")
-        if error:
-            gcmd.respond_raw(f"ACE Error: {error}")
-            return
-        
-        def callback(response):
-            if response.get('code', 0) != 0:
-                gcmd.respond_raw(f"ACE Error: {response.get('msg', 'Unknown error')}")
-            else:
-                self._feed_assist_index = index
-                gcmd.respond_info(f"Feed assist enabled for index {index} (slot {real_slot})")
-                self.dwell(0.3, lambda: None)
-        self.send_request({"method": "start_feed_assist", "params": {"index": real_slot}}, callback)
- 
-    def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
-        """ACE_DISABLE_FEED_ASSIST：对指定槽位停用送料辅助（默认用当前送料辅助槽位）。"""
-        index = gcmd.get_int('INDEX', self._feed_assist_index, minval=0, maxval=3)
-        
-        # 验证 INDEX 并转换为真实料槽
-        real_slot, error = self._validate_index_for_operation(index, "ACE_DISABLE_FEED_ASSIST")
-        if error:
-            gcmd.respond_raw(f"ACE Error: {error}")
-            return
-        
-        def callback(response):
-            if response.get('code', 0) != 0:
-                gcmd.respond_raw(f"ACE Error: {response.get('msg', 'Unknown error')}")
-            else:
-                self._feed_assist_index = -1
-                gcmd.respond_info(f"Feed assist disabled for index {index} (slot {real_slot})")
-                self.dwell(0.3, lambda: None)
-        self.send_request({"method": "stop_feed_assist", "params": {"index": real_slot}}, callback)
- 
-    def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
-        """ACE_PARK_TO_TOOLHEAD：将指定槽位耗材停泊到打印头（校验槽位就绪后调用 _park_to_toolhead）。"""
-        if self._park_in_progress:
-            gcmd.respond_raw("Already parking to toolhead")
-            return
-        
-        index = gcmd.get_int('INDEX', minval=0, maxval=3)
-        
-        # 验证 INDEX 并转换为真实料槽
-        real_slot, error = self._validate_index_for_operation(index, "ACE_PARK_TO_TOOLHEAD")
-        if error:
-            gcmd.respond_raw(f"ACE Error: {error}")
-            return
-        
-        # 检查料槽状态(应为'ready')
-        is_valid, error = self._validate_slot_status(real_slot, 'ready')
-        if not is_valid:
-            self.gcode.run_script_from_command(f"_ACE_ON_EMPTY_ERROR INDEX={index}")
-            return
-        
-        self._park_to_toolhead(real_slot)
- 
+    # ==================================================================
+    # ⑦ 送料/回退原语
+    # ==================================================================
+
     def cmd_ACE_FEED(self, gcmd):
         """ACE_FEED：按 LENGTH（mm）与 SPEED（mm/s）向指定槽位送料。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1331,7 +1443,7 @@ class SolisAce:
             "params": {"index": real_slot, "length": length, "speed": speed}
         }, callback)
         self.dwell((length / speed) + 0.1, lambda: None)
- 
+
     def cmd_ACE_UPDATE_FEEDING_SPEED(self, gcmd):
         """ACE_UPDATE_FEEDING_SPEED：运行中更新指定槽位的送料速度。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1351,7 +1463,7 @@ class SolisAce:
             "params": {"index": real_slot, "speed": speed}
         }, callback)
         self.dwell(0.5, lambda: None)
- 
+
     def cmd_ACE_STOP_FEED(self, gcmd):
         """ACE_STOP_FEED：停止指定槽位送料。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1369,7 +1481,7 @@ class SolisAce:
                 gcmd.respond_info("Feed stopped")
         self.send_request({"method": "stop_feed_filament", "params": {"index": real_slot}}, callback)
         self.dwell(0.5, lambda: None)
- 
+
     def cmd_ACE_RETRACT(self, gcmd):
         """ACE_RETRACT：按 LENGTH/SPEED/MODE 回抽指定槽位耗材（MODE：0 普通，1 增强）。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1392,7 +1504,7 @@ class SolisAce:
         }, callback)
         # 使用异步等待而不是阻塞式等待
         self.dwell((length / speed) + 0.1, lambda: None)
- 
+
     def cmd_ACE_UPDATE_RETRACT_SPEED(self, gcmd):
         """ACE_UPDATE_RETRACT_SPEED：运行中更新指定槽位的回抽速度。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1412,7 +1524,7 @@ class SolisAce:
             "params": {"index": real_slot, "speed": speed}
         }, callback)
         self.dwell(0.5, lambda: None)
- 
+
     def cmd_ACE_STOP_RETRACT(self, gcmd):
         """ACE_STOP_RETRACT：停止指定槽位回抽。"""
         index = gcmd.get_int('INDEX', minval=0, maxval=3)
@@ -1430,7 +1542,111 @@ class SolisAce:
                 gcmd.respond_info("Retract stopped")
         self.send_request({"method": "stop_unwind_filament", "params": {"index": real_slot}}, callback)
         self.dwell(0.5, lambda: None)
- 
+
+    def cmd_ACE_ENABLE_FEED_ASSIST(self, gcmd):
+        """ACE_ENABLE_FEED_ASSIST：对指定槽位启用送料辅助。"""
+        index = gcmd.get_int('INDEX', minval=0, maxval=3)
+
+        # 验证 INDEX 并转换为真实料槽
+        real_slot, error = self._validate_index_for_operation(index, "ACE_ENABLE_FEED_ASSIST")
+        if error:
+            gcmd.respond_raw(f"ACE Error: {error}")
+            return
+        
+        def callback(response):
+            if response.get('code', 0) != 0:
+                gcmd.respond_raw(f"ACE Error: {response.get('msg', 'Unknown error')}")
+            else:
+                self._feed_assist_index = index
+                gcmd.respond_info(f"Feed assist enabled for index {index} (slot {real_slot})")
+                self.dwell(0.3, lambda: None)
+        self.send_request({"method": "start_feed_assist", "params": {"index": real_slot}}, callback)
+
+    def cmd_ACE_DISABLE_FEED_ASSIST(self, gcmd):
+        """ACE_DISABLE_FEED_ASSIST：对指定槽位停用送料辅助（默认用当前送料辅助槽位）。"""
+        index = gcmd.get_int('INDEX', self._feed_assist_index, minval=0, maxval=3)
+        
+        # 验证 INDEX 并转换为真实料槽
+        real_slot, error = self._validate_index_for_operation(index, "ACE_DISABLE_FEED_ASSIST")
+        if error:
+            gcmd.respond_raw(f"ACE Error: {error}")
+            return
+        
+        def callback(response):
+            if response.get('code', 0) != 0:
+                gcmd.respond_raw(f"ACE Error: {response.get('msg', 'Unknown error')}")
+            else:
+                self._feed_assist_index = -1
+                gcmd.respond_info(f"Feed assist disabled for index {index} (slot {real_slot})")
+                self.dwell(0.3, lambda: None)
+        self.send_request({"method": "stop_feed_assist", "params": {"index": real_slot}}, callback)
+
+    # ==================================================================
+    # ⑧ 停泊到喷嘴（传统/传感器/距离）
+    # ==================================================================
+
+    def cmd_ACE_PARK_TO_TOOLHEAD(self, gcmd):
+        """ACE_PARK_TO_TOOLHEAD：将指定槽位耗材停泊到打印头（校验槽位就绪后调用 _park_to_toolhead）。"""
+        if self._park_in_progress:
+            gcmd.respond_raw("Already parking to toolhead")
+            return
+        
+        index = gcmd.get_int('INDEX', minval=0, maxval=3)
+        
+        # 验证 INDEX 并转换为真实料槽
+        real_slot, error = self._validate_index_for_operation(index, "ACE_PARK_TO_TOOLHEAD")
+        if error:
+            gcmd.respond_raw(f"ACE Error: {error}")
+            return
+        
+        # 检查料槽状态(应为'ready')
+        is_valid, error = self._validate_slot_status(real_slot, 'ready')
+        if not is_valid:
+            self.gcode.run_script_from_command(f"_ACE_ON_EMPTY_ERROR INDEX={index}")
+            return
+        
+        self._park_to_toolhead(real_slot)
+
+    def _park_to_toolhead(self, index: int):
+        """停泊调度：按 aggressive_parking 与传感器配置选择停车算法
+        （激进+传感器→sensor_based；激进+无传感器→distance_based；否则传统 feed_assist）。"""
+        # 在调用任何方法之前设置停车标志,以防止数据竞争
+        self._park_in_progress = True
+        self._park_error = False
+        self._park_index = index
+        self._assist_hit_count = 0
+        self._park_start_time = self.reactor.monotonic()
+        self._park_count_increased = False
+
+        # 检查是否应使用激进停车策略
+        if self.aggressive_parking:
+            # 检查耗材传感器是否已配置且可用
+            if self.filament_sensor:
+                self.logger.info(f"Using sensor-based aggressive parking for slot {index}")
+                self._sensor_based_parking(index)
+            else:
+                self.logger.info(f"Using distance-based aggressive parking for slot {index} (no filament sensor)")
+                self._distance_based_parking(index)
+        else:
+            self.logger.info(f"Starting traditional parking for slot {index}")
+
+            def callback(response):
+                if response.get('code', 0) != 0:
+                    if 'result' in response and 'msg' in response['result']:
+                        self.logger.error(f"ACE Error starting feed assist: {response['result']['msg']}")
+                    else:
+                        self.logger.error(f"ACE Error starting feed assist: {response.get('msg', 'Unknown error')}")
+                    # 由于设备无法开始送料,出错时重置停车标志
+                    self._park_in_progress = False
+                    self._park_monitor_timer = None
+                    self._sensor_monitor_timer = None
+                    self.logger.error(f"Parking aborted for slot {index} due to start_feed_assist error")
+                else:
+                    self._last_assist_count = response.get('result', {}).get('feed_assist_count', 0)
+                    self.logger.info(f"Feed assist started for slot {index}, count: {self._last_assist_count}")
+                self.dwell(0.3, lambda: None)
+            self.send_request({"method": "start_feed_assist", "params": {"index": index}}, callback)
+
     def _distance_based_parking(self, index: int):
         """
         当未配置耗材传感器时,使用基于距离的停车算法.
@@ -1748,9 +1964,47 @@ class SolisAce:
             "params": {"index": index}
         }, ensure_feed_assist_stopped)
 
-    # ------------------------------------------------------------------
-    # 编码器支持
-    # ------------------------------------------------------------------
+    def _complete_parking(self):
+        """停车成功收尾：停止 feed_assist 并清理所有停车标志与定时器引用。
+        注意：POST 换色宏不在此执行，统一由 cmd_ACE_CHANGE_TOOL 调用（见 F1 修复）。"""
+        if not self._park_in_progress:
+            return
+        self.logger.info(f"Parking completed for slot {self._park_index}")
+        
+        # 停止指定料槽的送料辅助
+        def stop_feed_assist_callback(response):
+            if response.get('code', 0) != 0:
+                self.logger.warning(f"Warning stopping feed assist after parking: {response.get('msg', 'Unknown error')}")
+            else:
+                self.logger.info(f"Feed assist stopped successfully after parking for slot {self._park_index}")
+        
+        self.send_request({
+            "method": "stop_feed_assist",
+            "params": {"index": self._park_index}
+        }, stop_feed_assist_callback)
+        
+        # POST 宏（_ACE_POST_TOOLCHANGE / _ACE_POST_INFINITYSPOOL）统一由
+        # cmd_ACE_CHANGE_TOOL 在等待停车完成后调用，此处不再执行：
+        #   - 避免每次换色冲刷跑两次（F1）
+        #   - 避免从 reader loop 上下文里跑宏（见 F4）
+        #   - cmd 用 Klipper 索引 TO={tool}，比此处真实槽 TO={_park_index} 更正确
+        self._park_in_progress = False
+        self._park_error = False  # 重置错误标志
+        self._park_is_toolchange = False
+        self._park_previous_tool = -1
+        self._park_index = -1
+        # 重置传感器停车标志
+        self._sensor_parking_active = False
+        self._sensor_parking_completed = False
+        # 清理计时器引用以防止泄漏
+        self._park_monitor_timer = None
+        self._sensor_monitor_timer = None
+        if self.disable_assist_after_toolchange:
+            self._feed_assist_index = -1
+
+    # ==================================================================
+    # ⑨ 两阶段同步 + 编码器
+    # ==================================================================
 
     def _on_encoder_edge(self, eventtime, state):
         """每次编码器信号边沿（上升沿或下降沿）时触发，累计到 _encoder_distance。"""
@@ -1758,10 +2012,6 @@ class SolisAce:
             return
         self._encoder_count += 1
         self._encoder_distance += self.encoder_resolution
-
-    # ------------------------------------------------------------------
-    # 两阶段同步送料（Phase 2：ACE + 挤出机联动到传感器2）
-    # ------------------------------------------------------------------
 
     def _start_sync_feed_phase(self, index: int):
         """
@@ -1919,10 +2169,6 @@ class SolisAce:
             "method": "stop_feed_filament",
             "params": {"index": index}
         }, lambda r: None)
-
-    # ------------------------------------------------------------------
-    # 两阶段同步回退（对称于 _start_sync_feed_phase）
-    # ------------------------------------------------------------------
 
     def _sync_retract_phase(self, index: int):
         """
@@ -2147,45 +2393,9 @@ class SolisAce:
             "params": {"index": index}
         }, lambda r: None)
 
-    def _park_to_toolhead(self, index: int):
-        """停泊调度：按 aggressive_parking 与传感器配置选择停车算法
-        （激进+传感器→sensor_based；激进+无传感器→distance_based；否则传统 feed_assist）。"""
-        # 在调用任何方法之前设置停车标志,以防止数据竞争
-        self._park_in_progress = True
-        self._park_error = False
-        self._park_index = index
-        self._assist_hit_count = 0
-        self._park_start_time = self.reactor.monotonic()
-        self._park_count_increased = False
-
-        # 检查是否应使用激进停车策略
-        if self.aggressive_parking:
-            # 检查耗材传感器是否已配置且可用
-            if self.filament_sensor:
-                self.logger.info(f"Using sensor-based aggressive parking for slot {index}")
-                self._sensor_based_parking(index)
-            else:
-                self.logger.info(f"Using distance-based aggressive parking for slot {index} (no filament sensor)")
-                self._distance_based_parking(index)
-        else:
-            self.logger.info(f"Starting traditional parking for slot {index}")
-
-            def callback(response):
-                if response.get('code', 0) != 0:
-                    if 'result' in response and 'msg' in response['result']:
-                        self.logger.error(f"ACE Error starting feed assist: {response['result']['msg']}")
-                    else:
-                        self.logger.error(f"ACE Error starting feed assist: {response.get('msg', 'Unknown error')}")
-                    # 由于设备无法开始送料,出错时重置停车标志
-                    self._park_in_progress = False
-                    self._park_monitor_timer = None
-                    self._sensor_monitor_timer = None
-                    self.logger.error(f"Parking aborted for slot {index} due to start_feed_assist error")
-                else:
-                    self._last_assist_count = response.get('result', {}).get('feed_assist_count', 0)
-                    self.logger.info(f"Feed assist started for slot {index}, count: {self._last_assist_count}")
-                self.dwell(0.3, lambda: None)
-            self.send_request({"method": "start_feed_assist", "params": {"index": index}}, callback)
+    # ==================================================================
+    # ⑩ 换色（总流程）
+    # ==================================================================
 
     def cmd_ACE_CHANGE_TOOL(self, gcmd):
         """ACE_CHANGE_TOOL：完整换色流程——校验目标槽 → PRE 宏(切刀) → 卸旧料(同步/简单回退)
@@ -2352,137 +2562,11 @@ class SolisAce:
             if self.toolhead:
                 self.toolhead.wait_moves()
             gcmd.respond_info(f"Tool changed from {was} to {tool} (real slot {real_tool})")
-     
-    def cmd_ACE_DISCONNECT(self, gcmd):
-        """强制断开与设备连接的G代码指令"""
-        try:
-            if self._connected:
-                self._manually_disconnected = True  # 标记为手动断开
-                self._disconnect()
-                gcmd.respond_info("ACE device disconnected successfully")
-                self.logger.info("Device manually disconnected via ACE_DISCONNECT command")
-            else:
-                gcmd.respond_info("ACE device is already disconnected")
-        except Exception as e:
-            self.logger.error(f"Error during forced disconnect: {str(e)}")
-            gcmd.respond_raw(f"Error disconnecting: {str(e)}")
 
-    def cmd_ACE_CONNECT(self, gcmd):
-        """用于连接设备的G代码指令"""
-        try:
-            if self._connected:
-                gcmd.respond_info("ACE device is already connected")
-            else:
-                self._manually_disconnected = False  # 重置手动断开标志
-                
-                # 尝试立即连接
-                success = self._connect()
-                
-                if success:
-                    gcmd.respond_info("ACE device connected successfully")
-                    self.logger.info("Device manually connected via ACE_CONNECT command")
-                else:
-                    gcmd.respond_raw("Failed to connect to ACE device")
-                    self.logger.error("Manual connection attempt failed")
-        except Exception as e:
-            self.logger.error(f"Error during manual connect: {str(e)}")
-            gcmd.respond_raw(f"Error connecting: {str(e)}")
+    # ==================================================================
+    # ⑪ 无限料盘
+    # ==================================================================
 
-    def cmd_ACE_CONNECTION_STATUS(self, gcmd):
-        """用于检查连接状态的G代码指令"""
-        try:
-            status = "connected" if self._connected else "disconnected"
-            gcmd.respond_info(f"ACE Connection Status: {status}")
-
-            if self._connected:
-                # 提供额外的连接详情
-                try:
-                    model = self._info.get('model', 'Unknown')
-                    firmware = self._info.get('firmware', 'Unknown')
-                    gcmd.respond_info(f"Device: {model}, Firmware: {firmware}")
-                except Exception:
-                    gcmd.respond_info("Device: connected (details unavailable)")
-            else:
-                gcmd.respond_info(f"Serial Port: {self.serial_name}")
-                gcmd.respond_info(f"Baud Rate: {self.baud}")
-            
-            # 额外的连接丢失状态信息
-            if self._connection_lost:
-                gcmd.respond_raw(f"ACE: Connection lost flag is set (attempts: {self._reconnect_attempts}/{self._max_reconnect_attempts})")
-                gcmd.respond_info("Try ACE_RECONNECT to reset the connection")
-        except Exception as e:
-            self.logger.error(f"Error checking connection status: {str(e)}")
-            gcmd.respond_raw(f"Error checking status: {str(e)}")
-
-    def cmd_ACE_RECONNECT(self, gcmd):
-        """用于手动重置连接并清除错误标志的G代码指令"""
-        try:
-            self.logger.info("Manual reconnection requested via ACE_RECONNECT")
-            # 重置错误标志
-            self._connection_lost = False
-            self._reconnect_attempts = 0
-            
-            # 尝试连接
-            self._manually_disconnected = False
-            self._disconnect()
-            self.dwell(1.0, lambda: None)
-            
-            success = self._connect()
-            if success:
-                gcmd.respond_info("ACE: Reconnection successful")
-            else:
-                gcmd.respond_raw("ACE: Reconnection failed, will retry automatically")
-        except Exception as e:
-            self.logger.error(f"Error during manual reconnect: {str(e)}")
-            gcmd.respond_raw(f"Error reconnecting: {str(e)}")
-
-    def cmd_ACE_SET_INFINITY_SPOOL_ORDER(self, gcmd):
-        """设置无限料盘模式的料槽顺序"""
-        order_str = gcmd.get('ORDER', '')
-        
-        if not order_str:
-            gcmd.respond_raw("Error: ORDER parameter is required")
-            gcmd.respond_info("Usage: ACE_SET_INFINITY_SPOOL_ORDER ORDER=\"0,1,2,3\"")
-            gcmd.respond_info("Use 'none' for empty slots, e.g.: ORDER=\"0,1,none,3\"")
-            return
-        
-        # 解析顺序字符串
-        try:
-            order_list = [item.strip().lower() for item in order_str.split(',')]
-            
-            # 验证顺序
-            if len(order_list) != 4:
-                gcmd.respond_raw(f"Error: Order must contain exactly 4 items, got {len(order_list)}")
-                return
-            
-            # 验证每一项
-            valid_slots = []
-            for i, item in enumerate(order_list):
-                if item == 'none':
-                    valid_slots.append('none')
-                else:
-                    try:
-                        slot_num = int(item)
-                        if slot_num < 0 or slot_num > 3:
-                            gcmd.respond_raw(f"Error: Slot number {slot_num} at position {i + 1} is out of range (0-3)")
-                            return
-                        valid_slots.append(slot_num)
-                    except ValueError:
-                        gcmd.respond_raw(f"Error: Invalid value '{item}' at position {i + 1}. Use slot number (0-3) or 'none'")
-                        return
-            
-            # 将顺序保存为逗号分隔的字符串
-            order_str_saved = ','.join(str(s) if s != 'none' else 'none' for s in valid_slots)
-            self._save_variable('ace_infsp_order', order_str_saved)
-            self._save_variable('ace_infsp_position', 0)  # 复位至起始位置
-            
-            gcmd.respond_info(f"Infinity spool order set: {order_str_saved}")
-            gcmd.respond_info(f"Order: {valid_slots}")
-            
-        except Exception as e:
-            self.logger.error(f"Error setting infinity spool order: {str(e)}")
-            gcmd.respond_raw(f"Error: {str(e)}")
- 
     def cmd_ACE_INFINITY_SPOOL(self, gcmd):
         """
         当 filament 结束时自动切换料槽.
@@ -2612,151 +2696,52 @@ class SolisAce:
             # 重置最后已知状态,以避免在下次调用 _check_slot_empty_status 时重复触发
             self.infsp_last_active_status = None
 
-    def cmd_ACE_GET_HELP(self, gcmd):
-        """显示所有可用的ACE命令及其说明"""
-        help_text = """
-====== SolisACE 命令&帮助 ======
-
-信息指令:
-  ACE_STATUS                - 获取完整的ACE设备状态
-  ACE_FILAMENT_INFO         - 从料槽获取耗材信息(需使用RFID)
-  ACE_CHECK_FILAMENT_SENSOR - 检查外部耗材传感器状态
-
-工具管理:
-  ACE_CHANGE_TOOL           - 更换工具(自动加载/卸载耗材)
-  ACE_PARK_TO_TOOLHEAD      - 将耗材停放在工具头喷嘴处
-
-耗材控制:
-  ACE_FEED                  - 从指定料槽送入耗材
-  ACE_RETRACT               - 将耗材回收到料槽中
-  ACE_STOP_FEED             - 停止退料
-  ACE_STOP_RETRACT          - 停止回抽
-  ACE_UPDATE_FEEDING_SPEED  - 实时更新送料速度
-  ACE_UPDATE_RETRACT_SPEED  - 实时更新回抽速度
-
-送料辅助:
-  ACE_ENABLE_FEED_ASSIST    - 为料槽启用进料辅助
-  ACE_DISABLE_FEED_ASSIST   - 禁用料槽的进料辅助
-
-干燥控制:
-  ACE_START_DRYING          - 开始耗材干燥过程
-  ACE_STOP_DRYING           - 停止耗材干燥过程
-
-连接:
-  ACE_DISCONNECT            - 强制断开与ACE设备的连接
-  ACE_CONNECT               - 连接到ACE设备
-  ACE_CONNECTION_STATUS     - 检查连接状态
-  ACE_RECONNECT             - 重置连接并清除错误标志
-
-无限耗材模式:
-  ACE_SET_INFINITY_SPOOL_ORDER - 设置无限料盘的料槽切换顺序
-  ACE_INFINITY_SPOOL        - 耗材用尽时自动更换料盘
-
-料槽映射:
-  ACE_GET_SLOTMAPPING       - 获取当前料槽映射(索引到料槽)
-  ACE_SET_SLOTMAPPING       - 设置料槽映射(INDEX=0-3,SLOT=0-3)
-  ACE_RESET_SLOTMAPPING     - 将料槽映射重置为默认值(0→0,1→1,2→2,3→3)
-
-索引管理:
-  ACE_GET_CURRENT_INDEX     - 获取当前工具索引值
-  ACE_SET_CURRENT_INDEX     - 设置当前工具索引值(用于错误恢复)
-
-调试:
-  ACE_DEBUG                 - 用于直接设备交互的调试命令
-===================================
-
-"""
-        gcmd.respond_info(help_text)
-
-    def cmd_ACE_GET_SLOTMAPPING(self, gcmd):
-        """
-        获取当前的索引到料槽映射.
+    def cmd_ACE_SET_INFINITY_SPOOL_ORDER(self, gcmd):
+        """设置无限料盘模式的料槽顺序"""
+        order_str = gcmd.get('ORDER', '')
         
-        输出格式
-        Slot Mapping:
-          Index 0 → Slot X
-          Index 1 → Slot X
-          Index 2 → Slot X
-          Index 3 → Slot X
-        """
-        output = ["=== Slot Mapping ==="]
-        for i in range(4):
-            output.append(f"  Index {i} → Slot {self.index_to_slot[i]}")
-        output.append("")
-        output.append(f"Current mapping: {self.index_to_slot}")
-        gcmd.respond_info("\n".join(output))
-
-    def cmd_ACE_SET_SLOTMAPPING(self, gcmd):
-        """
-        设置索引到料槽的映射.
-        
-        参数 / Parameters:
-          INDEX=0-3  - 来自Klipper的索引(T0-T3) / Index from Klipper(T0-T3)
-          SLOT=0-3   - 设备的真实料槽 / Real device slot
-        """
-        index = gcmd.get_int('INDEX', minval=0, maxval=3)
-        slot = gcmd.get_int('SLOT', minval=0, maxval=3)
-        
-        # 验证INDEX
-        real_index, error = self._validate_index(index)
-        if error:
-            gcmd.respond_raw(f"ACE Error: {error}")
+        if not order_str:
+            gcmd.respond_raw("Error: ORDER parameter is required")
+            gcmd.respond_info("Usage: ACE_SET_INFINITY_SPOOL_ORDER ORDER=\"0,1,2,3\"")
+            gcmd.respond_info("Use 'none' for empty slots, e.g.: ORDER=\"0,1,none,3\"")
             return
         
-        # 验证SLOT
-        if slot < 0 or slot > 3:
-            gcmd.respond_raw(f"ACE Error: SLOT {slot} out of range(must be 0-3)")
-            return
-        
-        old_slot = self.index_to_slot[index]
-        
-        if self._set_slot_mapping(index, slot):
-            gcmd.respond_info(f"Slot mapping updated: Index {index} → Slot {slot} (was Slot {old_slot})")
-            gcmd.respond_info(f"Current mapping: {self.index_to_slot}")
-        else:
-            gcmd.respond_raw(f"Error: Failed to set slot mapping for index {index}")
-
-    def cmd_ACE_RESET_SLOTMAPPING(self, gcmd):
-        """
-        将料槽映射重置为默认值.
-        将料槽映射重置为默认值(0→0,1→1,2→2,3→3).
-        """
-        old_mapping = self.index_to_slot.copy()
-        self._reset_slot_mapping()
-        gcmd.respond_info("Slot mapping reset to defaults")
-        gcmd.respond_info(f"  Old mapping: {old_mapping}")
-        gcmd.respond_info(f"  New mapping: {self.index_to_slot}")
-
-    def cmd_ACE_GET_CURRENT_INDEX(self, gcmd):
-        """
-        获取当前工具索引值.
-        此命令输出ace_current_index变量的当前值.
-        """
-        current_index = self.variables.get('ace_current_index', -1)
-        gcmd.respond_info(f"Current tool index: {current_index}")
-        
-    def cmd_ACE_SET_CURRENT_INDEX(self, gcmd):
-        """
-        设置当前工具索引值.
-        此命令允许用户在 -1 到 3 的范围内设置任意索引.
-        当打印机遇到错误且在耗材更换过程中未记录正确索引时非常有用.
-        
-        Parameters:
-          INDEX: The index to set(-1 to 3)
-        """
-        new_index = gcmd.get_int('INDEX', minval=-1, maxval=3)
-        
-        old_index = self.variables.get('ace_current_index', -1)
-        
-        # 更新变量
-        self.variables['ace_current_index'] = new_index
-        self._save_variable('ace_current_index', new_index)
-        
-        gcmd.respond_info(f"Tool index changed from {old_index} to {new_index}")
-
-    # ============================================================
-    # 无限料盘自动触发方法
-    # ============================================================
+        # 解析顺序字符串
+        try:
+            order_list = [item.strip().lower() for item in order_str.split(',')]
+            
+            # 验证顺序
+            if len(order_list) != 4:
+                gcmd.respond_raw(f"Error: Order must contain exactly 4 items, got {len(order_list)}")
+                return
+            
+            # 验证每一项
+            valid_slots = []
+            for i, item in enumerate(order_list):
+                if item == 'none':
+                    valid_slots.append('none')
+                else:
+                    try:
+                        slot_num = int(item)
+                        if slot_num < 0 or slot_num > 3:
+                            gcmd.respond_raw(f"Error: Slot number {slot_num} at position {i + 1} is out of range (0-3)")
+                            return
+                        valid_slots.append(slot_num)
+                    except ValueError:
+                        gcmd.respond_raw(f"Error: Invalid value '{item}' at position {i + 1}. Use slot number (0-3) or 'none'")
+                        return
+            
+            # 将顺序保存为逗号分隔的字符串
+            order_str_saved = ','.join(str(s) if s != 'none' else 'none' for s in valid_slots)
+            self._save_variable('ace_infsp_order', order_str_saved)
+            self._save_variable('ace_infsp_position', 0)  # 复位至起始位置
+            
+            gcmd.respond_info(f"Infinity spool order set: {order_str_saved}")
+            gcmd.respond_info(f"Order: {valid_slots}")
+            
+        except Exception as e:
+            self.logger.error(f"Error setting infinity spool order: {str(e)}")
+            gcmd.respond_raw(f"Error: {str(e)}")
 
     def _is_printer_printing(self):
         """检查打印机是否处于打印状态."""
@@ -2932,66 +2917,118 @@ class SolisAce:
         gcode = self.printer.lookup_object('gcode')
         gcode.run_script('PAUSE')
 
-    def cmd_ACE_SET_SLOT(self, gcmd):
-        """设置料槽耗材元数据（颜色/材料/温度/预设名）。
-        用法: ACE_SET_SLOT INDEX=<0-3> COLOR="R,G,B" MATERIAL=<name> TEMP=<°C> [FILAMENT_SETTINGS_ID=<name>]
-        也接受 T=<0-3> 替代 INDEX（T 为 Klipper 工具编号，会映射到物理料槽）。
-        """
-        index = gcmd.get_int('INDEX', None, minval=0, maxval=3)
-        tool = gcmd.get_int('T', None, minval=0, maxval=3)
-        gcmd.get_int('INSTANCE', 0)  # 接受但忽略（单实例模式）
+    # ==================================================================
+    # ⑫ 通用辅助
+    # ==================================================================
 
-        if index is not None:
-            slot_idx = index  # 直接物理料槽索引
-        elif tool is not None:
-            slot_idx = self.index_to_slot[tool] if 0 <= tool < len(self.index_to_slot) else tool
-        else:
-            gcmd.respond_raw("ACE Error: INDEX or T parameter required")
+    def dwell(self, delay: float = 1.0, callback: Optional[Callable] = None):
+        """暂停执行,使用反应器"""
+        if delay <= 0:
+            if callback:
+                try:
+                    callback()
+                except Exception as e:
+                    self.logger.error(f"Error in dwell callback: {e}")
             return
+        
+        def timer_handler(event_time):
+            if callback:
+                try:
+                    callback()
+                except Exception as e:
+                    self.logger.error(f"Error in dwell callback: {e}")
+            return self.reactor.NEVER
+        
+        self.reactor.register_timer(timer_handler, self.reactor.monotonic() + delay)
 
-        color_str = gcmd.get('COLOR', '0,0,0')
-        material = gcmd.get('MATERIAL', '')
-        temp = gcmd.get_float('TEMP', 0.0, minval=0, maxval=400)
-        filament_id = gcmd.get('FILAMENT_SETTINGS_ID', '')
-
-        rgb = [0, 0, 0]
+    def _get_printer_state(self):
+        """获取当前打印状态"""
+        eventtime = self.reactor.monotonic()
         try:
-            parts = [int(x.strip()) for x in color_str.split(',')]
-            if len(parts) >= 3:
-                rgb = [max(0, min(255, p)) for p in parts[:3]]
-        except (ValueError, IndexError):
-            self.logger.warning(f"ACE_SET_SLOT: invalid COLOR '{color_str}', using [0,0,0]")
+            print_stats = self.printer.lookup_object('print_stats')
+            ps_status = print_stats.get_status(eventtime)
+            return ps_status.get('state', 'unknown')
+        except Exception:
+            return 'unknown'
 
-        # 更新内存中的料槽状态（立即反映到 get_status / Moonraker API）
-        slots = self._info.get('slots', [])
-        for slot in slots:
-            if slot.get('index') == slot_idx:
-                slot['color'] = rgb
-                if material:
-                    slot['type'] = material
-                break
+    def _pause_print_if_needed(self):
+        """如果打印机正在打印则调用暂停"""
+        printer_state = self._get_printer_state()
+        if printer_state == 'printing':
+            self.logger.info(f"Print in progress, triggering {self.pause_macro_name}")
+            try:
+                self.gcode.run_script_from_command(self.pause_macro_name)
+            except Exception as e:
+                self.logger.error(f"Error triggering {self.pause_macro_name}: {str(e)}")
 
-        # 持久化数值字段（字符串字段依赖 in-memory self.variables）
-        self._save_variable(f'ace_slot{slot_idx}_r', rgb[0])
-        self._save_variable(f'ace_slot{slot_idx}_g', rgb[1])
-        self._save_variable(f'ace_slot{slot_idx}_b', rgb[2])
-        self._save_variable(f'ace_slot{slot_idx}_temp', int(temp))
-        if material:
-            self.variables[f'ace_slot{slot_idx}_material'] = material
-        if filament_id is not None:
-            self.variables[f'ace_slot{slot_idx}_filament_id'] = filament_id
+    def _save_variable(self, name: str, value):
+        """如果save_variables模块可用, 则安全地保存变量"""
+        self.variables[name] = value
+        try:
+            self.gcode.run_script_from_command(f'SAVE_VARIABLE VARIABLE={name} VALUE={value}')
+        except Exception as e:
+            # save_variables 不可用或保存时出错
+            self.logger.debug(f"Could not save variable {name}: {e}")
 
-        gcmd.respond_info(
-            f"Slot {slot_idx} updated: material={material or '(unchanged)'}, "
-            f"color=RGB({rgb[0]},{rgb[1]},{rgb[2]}), temp={int(temp)}°C"
-        )
+    # ==================================================================
+    # ⑬ 帮助
+    # ==================================================================
 
-    def cmd_ACE_SAVE_INVENTORY(self, gcmd):
-        """保存耗材库存快照。
-        槽位数值数据已在 ACE_SET_SLOT 中实时保存，此命令仅为 web UI 提供成功确认。
-        """
-        gcmd.get_int('INSTANCE', 0)  # 接受但忽略
-        gcmd.respond_info("Inventory saved")
+    def cmd_ACE_GET_HELP(self, gcmd):
+        """显示所有可用的ACE命令及其说明"""
+        help_text = """
+====== SolisACE 命令&帮助 ======
+
+信息指令:
+  ACE_STATUS                - 获取完整的ACE设备状态
+  ACE_FILAMENT_INFO         - 从料槽获取耗材信息(需使用RFID)
+  ACE_CHECK_FILAMENT_SENSOR - 检查外部耗材传感器状态
+
+工具管理:
+  ACE_CHANGE_TOOL           - 更换工具(自动加载/卸载耗材)
+  ACE_PARK_TO_TOOLHEAD      - 将耗材停放在工具头喷嘴处
+
+耗材控制:
+  ACE_FEED                  - 从指定料槽送入耗材
+  ACE_RETRACT               - 将耗材回收到料槽中
+  ACE_STOP_FEED             - 停止退料
+  ACE_STOP_RETRACT          - 停止回抽
+  ACE_UPDATE_FEEDING_SPEED  - 实时更新送料速度
+  ACE_UPDATE_RETRACT_SPEED  - 实时更新回抽速度
+
+送料辅助:
+  ACE_ENABLE_FEED_ASSIST    - 为料槽启用进料辅助
+  ACE_DISABLE_FEED_ASSIST   - 禁用料槽的进料辅助
+
+干燥控制:
+  ACE_START_DRYING          - 开始耗材干燥过程
+  ACE_STOP_DRYING           - 停止耗材干燥过程
+
+连接:
+  ACE_DISCONNECT            - 强制断开与ACE设备的连接
+  ACE_CONNECT               - 连接到ACE设备
+  ACE_CONNECTION_STATUS     - 检查连接状态
+  ACE_RECONNECT             - 重置连接并清除错误标志
+
+无限耗材模式:
+  ACE_SET_INFINITY_SPOOL_ORDER - 设置无限料盘的料槽切换顺序
+  ACE_INFINITY_SPOOL        - 耗材用尽时自动更换料盘
+
+料槽映射:
+  ACE_GET_SLOTMAPPING       - 获取当前料槽映射(索引到料槽)
+  ACE_SET_SLOTMAPPING       - 设置料槽映射(INDEX=0-3,SLOT=0-3)
+  ACE_RESET_SLOTMAPPING     - 将料槽映射重置为默认值(0→0,1→1,2→2,3→3)
+
+索引管理:
+  ACE_GET_CURRENT_INDEX     - 获取当前工具索引值
+  ACE_SET_CURRENT_INDEX     - 设置当前工具索引值(用于错误恢复)
+
+调试:
+  ACE_DEBUG                 - 用于直接设备交互的调试命令
+===================================
+
+"""
+        gcmd.respond_info(help_text)
 
 
 # ==========================================================================
