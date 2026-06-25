@@ -1579,6 +1579,7 @@ class SolisAce:
             self._sensor_monitor_timer = None
 
         def check_sensor(eventtime):
+            """传感器停车监测定时器：轮询 filament_sensor，触发则停止送料并转入传统停车；超时/异常则报错并暂停打印。"""
             if not self._park_in_progress:
                 # 停车取消或已在其他地方完成
                 cleanup_sensor_timer()
@@ -1634,6 +1635,7 @@ class SolisAce:
                     status_poll_interval = 0.2
                     
                     def wait_for_device_ready(eventtime):
+                        """等待 ACE 状态变 ready 后进入下一阶段：有传感器2则启动同步送料 Phase 2，否则转传统停车；超时则继续。"""
                         elapsed = eventtime - status_wait_start
 
                         # 检查超时
@@ -1778,6 +1780,7 @@ class SolisAce:
         sync_timeout = (self.max_parking_distance / self.sync_parking_speed) + self.extended_park_time
 
         def on_ace_feed_started(response):
+            """Phase 2 送料启动回调：ACE feed_filament 成功则进入同步步进循环，失败则回退到传统停车。"""
             if response.get('code', 0) != 0:
                 self.logger.error(
                     f"Phase 2: feed_filament failed: {response.get('msg', '')}, "
@@ -1833,6 +1836,7 @@ class SolisAce:
         new_total = total_extruded + step_mm
 
         def check_after_step(eventtime):
+            """Phase 2 送料步进后检查：超时/超距→传统停车兜底；传感器2触发→停止并落座；否则继续下一步。"""
             if not self._park_in_progress:
                 return self.reactor.NEVER
 
@@ -1884,6 +1888,7 @@ class SolisAce:
                         wait_start = self.reactor.monotonic()
 
                         def wait_ready_then_traditional(et):
+                            """传感器2触发后等待 ACE 就绪，再转入传统停车做最终落座确认；超时则直接转入。"""
                             if self.reactor.monotonic() - wait_start > 5.0:
                                 self.logger.warning("Phase 2: wait-for-ready timeout, proceeding")
                                 self._switch_to_traditional_parking(index)
@@ -1959,6 +1964,7 @@ class SolisAce:
         sync_timeout = (self.max_parking_distance / self.sync_parking_speed) + self.extended_park_time
 
         def on_ace_unwind_started(response):
+            """Phase 2 回退启动回调：ACE unwind_filament 成功则进入同步回退循环，失败则报错收尾。"""
             if response.get('code', 0) != 0:
                 self.logger.error(
                     f"Retract Phase 2: unwind_filament failed: {response.get('msg', '')}"
@@ -2012,6 +2018,7 @@ class SolisAce:
         new_total = total_retracted + step_mm
 
         def check_after_step(eventtime):
+            """Phase 2 回退步进后检查：超时/超距→交 ACE 单独回退；传感器1清除(脱离齿轮)→转 ACE 单独退剩余；否则继续。"""
             elapsed = self.reactor.monotonic() - sync_start_time
 
             # 超时：ACE 继续完成剩余回退
@@ -2082,6 +2089,7 @@ class SolisAce:
             wait_start = self.reactor.monotonic()
 
             def wait_ready_no_unwind(et):
+                """无需额外回退时，等待料槽 ready 后结束回退流程；超时则强制结束。"""
                 if self.reactor.monotonic() - wait_start > 10.0:
                     self.logger.warning("Retract: slot-ready timeout (no remaining)")
                     self._retract_in_progress = False
@@ -2101,6 +2109,7 @@ class SolisAce:
         expected_time = (length / self.retract_speed) + 1.0
 
         def on_unwind_done(response):
+            """ACE 单独回退完成回调：成功则等待料槽 ready，失败则报错并结束回退。"""
             if response.get('code', 0) != 0:
                 self.logger.error(
                     f"Retract: ACE-alone unwind failed: {response.get('msg', '')}"
@@ -2112,6 +2121,7 @@ class SolisAce:
             wait_start = self.reactor.monotonic()
 
             def wait_slot_ready(et):
+                """轮询等待料槽状态变 ready，标记回退完成；超时则放弃等待并结束。"""
                 if self.reactor.monotonic() - wait_start > expected_time + 5.0:
                     self.logger.warning("Retract: slot-ready timeout")
                     self._retract_in_progress = False
