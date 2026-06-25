@@ -5,6 +5,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 
+# 本地打印机配置（不入库）
+.voron_config/
+
 # Klipper 运行时 / 配置备份
 vars.cfg
 *.backup_*

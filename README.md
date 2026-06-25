@@ -100,7 +100,7 @@ ACE_DEBUG METHOD=get_info
 
 ACE Pro 通过 MX3.0 6P 端子连接标准 USB：
 
-![Molex](/.github/img/molex.png)
+![Molex](/img/molex.png)
 
 | 针脚 | 说明 |
 |------|------|
@@ -111,13 +111,17 @@ ACE Pro 通过 MX3.0 6P 端子连接标准 USB：
 
 将 MX3.0 端子连接到普通 USB 线即可。端子可在电商搜索【MX3.0 公壳】。
 
-![MX3.0](/.github/img/MX3.0Male shell+ female terminal.png)
+![MX3.0](/img/MX3.0Male shell+ female terminal.png)
+
+> ⚠️ **6P 和 4P 别插错**：ACE 机壳上有 **6P** 和 **4P** 两个 MX3.0 口，方向相反。
+> - **6P = USB 从机口（上行）** → 连主机（打印机 / Klipper 上位机），枚举为 `/dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00`。**SolisACE 用这个。**
+> - **4P = USB 主机口（下行）** → 用于**串联第二台 ACE**（本台 4P → 下台 6P）。它是主机侧端口，**插到上位机不会枚举出设备**（实测：用 4P 在 Ubuntu 上找不到 `/dev/serial/by-id/...`）。
 
 ---
 
 ## Web 仪表板
 
-![Web](/.github/img/valgace-web.png)
+![Web](/img/valgace-web.png)
 
 install.sh 自动将 Web 仪表板部署到 nginx，默认端口 **8088**：
 
@@ -185,6 +189,7 @@ curl -X POST http://<打印机IP>:7125/server/ace/command \
 | [通信协议](docs/PROTOCOL.md) | ACE 二进制协议 |
 | [温度传感器](docs/ACE_TEMPERATURE_SENSOR.md) | temperature_ace 模块 |
 | [变更日志](docs/changelog.md) | 版本历史 |
+| [硬件底层资料](docs/HARDWARE.md) | 主板引脚、芯片、内部结构 |
 
 ---
 

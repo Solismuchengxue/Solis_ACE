@@ -44,7 +44,7 @@ pip3 install pyserial
 
 ACE Pro 通过 MX3.0 6P 端子连接到标准 USB：
 
-![Molex](/.github/img/molex.png)
+![Molex](/img/molex.png)
 
 **针脚分布：**
 
