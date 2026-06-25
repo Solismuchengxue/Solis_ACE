@@ -42,7 +42,38 @@ class SolisAce:
             except Exception as e:
                 self.logger.warning(f"Filament sensor '{self.filament_sensor_name}' not found: {str(e)}")
                 self.filament_sensor = None
-        
+
+        # 传感器2：挤出机齿轮下游（两阶段同步送料用）
+        self.filament_sensor_2_name = config.get('filament_sensor_2', None)
+        self.filament_sensor_2 = None
+        if self.filament_sensor_2_name:
+            try:
+                self.filament_sensor_2 = self.printer.lookup_object(
+                    f'filament_switch_sensor {self.filament_sensor_2_name}')
+                self.logger.info(f"Filament sensor 2 '{self.filament_sensor_2_name}' found (two-phase sync)")
+            except Exception as e:
+                self.logger.warning(f"Filament sensor 2 '{self.filament_sensor_2_name}' not found: {str(e)}")
+                self.filament_sensor_2 = None
+
+        # 编码器（可选）：耗材移动计量与打滑检测
+        # 连接方式：encoder V→3.3V，G→GND，S→PA2（~PA2 禁用内部上拉，PCB已有100K外部上拉）
+        self.encoder_pin_name = config.get('encoder_pin', None)
+        self.encoder_resolution = config.getfloat('encoder_resolution', 0.472)
+        self._encoder_count = 0
+        self._encoder_distance = 0.0
+        self._encoder_enabled = False
+        if self.encoder_pin_name:
+            try:
+                buttons = self.printer.load_object(config, 'buttons')
+                buttons.register_buttons([self.encoder_pin_name], self._on_encoder_edge)
+                self.logger.info(
+                    f"Encoder registered on pin {self.encoder_pin_name}, "
+                    f"resolution {self.encoder_resolution:.4f} mm/pulse"
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to register encoder pin '{self.encoder_pin_name}': {e}")
+                self.encoder_pin_name = None
+
         # 可选依赖: save_variables
         try:
             save_vars = self.printer.lookup_object('save_variables')
@@ -84,6 +115,10 @@ class SolisAce:
         self.extended_park_time = config.getint('extended_park_time', 10)
         # 停车的最大等待时间(秒)
         self.max_parking_timeout = config.getint('max_parking_timeout', 60)
+        # 两阶段同步送料速度（ACE + 挤出机联动，mm/s）
+        self.sync_parking_speed = config.getint('sync_parking_speed', 15)
+        # 两阶段步进粒度（mm）：CW2 等传感器间距短的挤出机建议 1-3mm
+        self.sync_extrude_step = config.getfloat('sync_extrude_step', 2.0)
 
         # 打印暂停宏(默认为 PAUSE)
         self.pause_macro_name = config.get('set_pause_macro_name', 'PAUSE')
@@ -115,6 +150,9 @@ class SolisAce:
         # 激进停车与传感器的标志
         self._sensor_parking_active = False  # True 当使用传感器停车时
         self._sensor_parking_completed = False  # True 当传感器成功触发时
+        # 同步回退（Phase 2 对称）
+        self._retract_in_progress = False
+        self._retract_error = False
 
         # 队列
         self._queue = queue.Queue(maxsize=self._max_queue_size)
@@ -1012,7 +1050,7 @@ class SolisAce:
                 remain_time = remain_time_raw / 60 if remain_time_raw > 0 else 0
                 
                 if remain_time > 0:
-                    # 格式化为“119分54秒”
+                    # 格式化为"119分54秒"
                     total_minutes = int(remain_time)
                     fractional_part = remain_time - total_minutes
                     seconds = int(round(fractional_part * 60))
@@ -1376,7 +1414,7 @@ class SolisAce:
         算法:
         1. 送料(最大停车距离 - 20) 毫米
         2. 等待(最大停车距离 / 停车速度) 秒
-        3. 轮询料槽状态,直至其变为“就绪”状态
+        3. 轮询料槽状态,直至其变为"就绪"状态
         4. 启动传统停车(送料辅助)
         """
         self.logger.info(f"Starting distance-based parking for slot {index}")
@@ -1573,23 +1611,30 @@ class SolisAce:
                     
                     def wait_for_device_ready(eventtime):
                         elapsed = eventtime - status_wait_start
-                        
+
                         # 检查超时
                         if elapsed > status_wait_timeout:
-                            self.logger.warning(f"Timeout waiting for device ready status after stop_feed_filament for slot {index}, continuing anyway")
-                            self.gcode.respond_info("ACE: Timeout waiting for device ready, continuing with traditional parking")
-                            self._switch_to_traditional_parking(index)
+                            self.logger.warning(f"Timeout waiting for device ready after stop_feed_filament for slot {index}, continuing anyway")
+                            self.gcode.respond_info("ACE: Timeout waiting for device ready, continuing parking")
+                            if self.filament_sensor_2:
+                                self._start_sync_feed_phase(index)
+                            else:
+                                self._switch_to_traditional_parking(index)
                             cleanup_sensor_timer()
                             return self.reactor.NEVER
-                        
+
                         # 检查设备状态
                         current_status = self._info.get('status', 'unknown')
                         if current_status == 'ready':
-                            self.logger.info(f"Device ready after {elapsed:.1f}s, switching to traditional parking for slot {index}")
-                            self._switch_to_traditional_parking(index)
+                            next_phase = 'sync feed phase 2' if self.filament_sensor_2 else 'traditional parking'
+                            self.logger.info(f"Device ready after {elapsed:.1f}s, entering {next_phase} for slot {index}")
+                            if self.filament_sensor_2:
+                                self._start_sync_feed_phase(index)
+                            else:
+                                self._switch_to_traditional_parking(index)
                             cleanup_sensor_timer()
                             return self.reactor.NEVER
-                        
+
                         # 继续轮询
                         return eventtime + status_poll_interval
                     
@@ -1677,6 +1722,397 @@ class SolisAce:
             "params": {"index": index}
         }, ensure_feed_assist_stopped)
 
+    # ------------------------------------------------------------------
+    # 编码器支持
+    # ------------------------------------------------------------------
+
+    def _on_encoder_edge(self, eventtime, state):
+        """每次编码器信号边沿（上升沿或下降沿）时触发，累计到 _encoder_distance。"""
+        if not self._encoder_enabled:
+            return
+        self._encoder_count += 1
+        self._encoder_distance += self.encoder_resolution
+
+    # ------------------------------------------------------------------
+    # 两阶段同步送料（Phase 2：ACE + 挤出机联动到传感器2）
+    # ------------------------------------------------------------------
+
+    def _start_sync_feed_phase(self, index: int):
+        """
+        第二阶段同步送料：传感器1触发后，ACE + 挤出机联动，
+        将耗材推过挤出机齿轮，直到传感器2触发（或超时/距离兜底）。
+        配置需要：filament_sensor_2 + sync_parking_speed。
+        """
+        self.logger.info(f"Phase 2 sync feed starting for slot {index}")
+
+        # 重置编码器，开始第二阶段计量
+        self._encoder_count = 0
+        self._encoder_distance = 0.0
+        self._encoder_enabled = True
+
+        sync_start_time = self.reactor.monotonic()
+        sync_timeout = (self.max_parking_distance / self.sync_parking_speed) + self.extended_park_time
+
+        def on_ace_feed_started(response):
+            if response.get('code', 0) != 0:
+                self.logger.error(
+                    f"Phase 2: feed_filament failed: {response.get('msg', '')}, "
+                    "falling back to traditional parking"
+                )
+                self._encoder_enabled = False
+                self._switch_to_traditional_parking(index)
+                return
+
+            self.logger.info(
+                f"Phase 2: ACE feeding at {self.sync_parking_speed} mm/s, "
+                f"timeout {sync_timeout:.1f}s"
+            )
+            self._sync_feed_loop(index, 0.0, sync_start_time, sync_timeout)
+
+        self.send_request({
+            "method": "feed_filament",
+            "params": {
+                "index": index,
+                "length": self.max_parking_distance,
+                "speed": self.sync_parking_speed
+            }
+        }, on_ace_feed_started)
+
+    def _sync_feed_loop(self, index: int, total_extruded: float,
+                        sync_start_time: float, sync_timeout: float):
+        """
+        第二阶段送料循环：每次向挤出机发出 5 mm 步进，
+        等待该步进时长后检查传感器2、超时和距离限制。
+        挤出机步进通过 SAVE_GCODE_STATE + M83 + G1 + RESTORE_GCODE_STATE 发出，
+        与当前绝对/相对模式无关。
+        """
+        step_mm = self.sync_extrude_step
+        step_duration = step_mm / self.sync_parking_speed
+
+        extrude_script = (
+            "SAVE_GCODE_STATE NAME=_ACE_SYNC\n"
+            "M83\n"
+            f"G1 E{step_mm:.1f} F{int(self.sync_parking_speed * 60)}\n"
+            "RESTORE_GCODE_STATE NAME=_ACE_SYNC"
+        )
+        try:
+            self.gcode.run_script_from_command(extrude_script)
+        except Exception as e:
+            self.logger.error(f"Phase 2: extruder move failed: {e}")
+            self._stop_ace_sync_feed(index)
+            self._encoder_enabled = False
+            self._park_error = True
+            self._park_in_progress = False
+            self._pause_print_if_needed()
+            return
+
+        new_total = total_extruded + step_mm
+
+        def check_after_step(eventtime):
+            if not self._park_in_progress:
+                return self.reactor.NEVER
+
+            # 超时检查
+            elapsed = self.reactor.monotonic() - sync_start_time
+            if elapsed > sync_timeout:
+                self.logger.error(
+                    f"Phase 2: timeout {elapsed:.1f}s/{sync_timeout:.1f}s "
+                    f"({new_total:.1f}mm extruded), falling through to traditional"
+                )
+                self._stop_ace_sync_feed(index)
+                self._encoder_enabled = False
+                self._switch_to_traditional_parking(index)
+                return self.reactor.NEVER
+
+            # 距离上限兜底
+            if new_total >= self.max_parking_distance:
+                self.logger.warning(
+                    f"Phase 2: max_parking_distance {self.max_parking_distance}mm "
+                    "reached without sensor2 trigger, continuing to traditional"
+                )
+                self._stop_ace_sync_feed(index)
+                self._encoder_enabled = False
+                self._switch_to_traditional_parking(index)
+                return self.reactor.NEVER
+
+            # 编码器打滑检测（仅警告，不中断送料）
+            if self._encoder_enabled and self.encoder_pin_name and new_total > 10.0:
+                expected_min = new_total * 0.5
+                if self._encoder_distance < expected_min:
+                    self.logger.warning(
+                        f"Phase 2 slip warning: commanded {new_total:.1f}mm, "
+                        f"encoder only {self._encoder_distance:.1f}mm"
+                    )
+
+            # 检查传感器2
+            if self.filament_sensor_2:
+                try:
+                    s2_status = self.filament_sensor_2.get_status(eventtime)
+                    if s2_status.get('filament_detected', False):
+                        self.logger.info(
+                            f"Phase 2: sensor2 triggered after {new_total:.1f}mm "
+                            f"(encoder {self._encoder_distance:.1f}mm)"
+                        )
+                        self._stop_ace_sync_feed(index)
+                        self._encoder_enabled = False
+
+                        # 等待 ACE 就绪后进入传统停车（最终落座确认）
+                        wait_start = self.reactor.monotonic()
+
+                        def wait_ready_then_traditional(et):
+                            if self.reactor.monotonic() - wait_start > 5.0:
+                                self.logger.warning("Phase 2: wait-for-ready timeout, proceeding")
+                                self._switch_to_traditional_parking(index)
+                                return self.reactor.NEVER
+                            if self._info.get('status', '') == 'ready':
+                                self._switch_to_traditional_parking(index)
+                                return self.reactor.NEVER
+                            return et + 0.2
+
+                        self.reactor.register_timer(wait_ready_then_traditional, self.reactor.NOW)
+                        return self.reactor.NEVER
+                except Exception as e:
+                    self.logger.error(f"Phase 2: sensor2 check error: {e}")
+
+            # 继续下一步进
+            self._sync_feed_loop(index, new_total, sync_start_time, sync_timeout)
+            return self.reactor.NEVER
+
+        # 延迟 step_duration + 50ms buffer 后检查
+        self.reactor.register_timer(
+            check_after_step,
+            self.reactor.monotonic() + step_duration + 0.05
+        )
+
+    def _stop_ace_sync_feed(self, index: int):
+        """停止第二阶段 ACE feed_filament。"""
+        self.send_request({
+            "method": "stop_feed_filament",
+            "params": {"index": index}
+        }, lambda r: None)
+
+    # ------------------------------------------------------------------
+    # 两阶段同步回退（对称于 _start_sync_feed_phase）
+    # ------------------------------------------------------------------
+
+    def _sync_retract_phase(self, index: int):
+        """
+        两阶段同步回退：
+          开始条件：filament_sensor_2（toolhead_sensor）检测到耗材
+          过程：ACE unwind_filament + 挤出机负向步进同步
+          结束条件：filament_sensor（extruder_sensor）不再检测到耗材
+                    （耗材完全退出挤出机齿轮）
+          收尾：ACE 单独回退剩余 toolchange_retract_length - 已退量
+        通过 _retract_in_progress / _retract_error 与 cmd_ACE_CHANGE_TOOL 同步。
+        """
+        # 开始条件检查：传感器2必须有耗材，否则跳过同步直接 ACE 单独全程回退
+        sensor2_has_filament = False
+        if self.filament_sensor_2:
+            try:
+                s2_status = self.filament_sensor_2.get_status(self.reactor.monotonic())
+                sensor2_has_filament = s2_status.get('filament_detected', False)
+            except Exception as e:
+                self.logger.error(f"Retract Phase 2: pre-check sensor2 error: {e}")
+
+        self._retract_in_progress = True
+        self._retract_error = False
+
+        if not sensor2_has_filament:
+            self.logger.info(
+                "Retract Phase 2: sensor2 not detecting, skipping sync, "
+                "ACE alone retracts full toolchange_retract_length"
+            )
+            self._start_ace_alone_retract(index, self.toolchange_retract_length)
+            return
+
+        self.logger.info(f"Retract Phase 2 (sync) starting for slot {index}")
+
+        self._encoder_count = 0
+        self._encoder_distance = 0.0
+        self._encoder_enabled = True
+
+        sync_start_time = self.reactor.monotonic()
+        sync_timeout = (self.max_parking_distance / self.sync_parking_speed) + self.extended_park_time
+
+        def on_ace_unwind_started(response):
+            if response.get('code', 0) != 0:
+                self.logger.error(
+                    f"Retract Phase 2: unwind_filament failed: {response.get('msg', '')}"
+                )
+                self._encoder_enabled = False
+                self._retract_error = True
+                self._retract_in_progress = False
+                return
+
+            self.logger.info(
+                f"Retract Phase 2: ACE unwinding at {self.sync_parking_speed} mm/s, "
+                f"timeout {sync_timeout:.1f}s, end: sensor1 clear"
+            )
+            self._sync_retract_loop(index, 0.0, sync_start_time, sync_timeout)
+
+        self.send_request({
+            "method": "unwind_filament",
+            "params": {
+                "index": index,
+                "length": self.max_parking_distance,
+                "speed": self.sync_parking_speed
+            }
+        }, on_ace_unwind_started)
+
+    def _sync_retract_loop(self, index: int, total_retracted: float,
+                           sync_start_time: float, sync_timeout: float):
+        """
+        同步回退循环：每次发出 -sync_extrude_step mm 挤出机步进，
+        等待后检查 filament_sensor（传感器1/extruder_sensor）是否已清除。
+        传感器1清除 = 耗材已完全退出挤出机齿轮。
+        """
+        step_mm = self.sync_extrude_step
+        step_duration = step_mm / self.sync_parking_speed
+
+        retract_script = (
+            "SAVE_GCODE_STATE NAME=_ACE_SYNC_R\n"
+            "M83\n"
+            f"G1 E-{step_mm:.1f} F{int(self.sync_parking_speed * 60)}\n"
+            "RESTORE_GCODE_STATE NAME=_ACE_SYNC_R"
+        )
+        try:
+            self.gcode.run_script_from_command(retract_script)
+        except Exception as e:
+            self.logger.error(f"Retract Phase 2: extruder step failed: {e}")
+            self._stop_ace_sync_retract(index)
+            self._encoder_enabled = False
+            self._retract_error = True
+            self._retract_in_progress = False
+            return
+
+        new_total = total_retracted + step_mm
+
+        def check_after_step(eventtime):
+            elapsed = self.reactor.monotonic() - sync_start_time
+
+            # 超时：ACE 继续完成剩余回退
+            if elapsed > sync_timeout:
+                self.logger.error(
+                    f"Retract Phase 2: timeout {elapsed:.1f}s/{sync_timeout:.1f}s "
+                    f"({new_total:.1f}mm), handing off to ACE-alone"
+                )
+                self._stop_ace_sync_retract(index)
+                self._encoder_enabled = False
+                remaining = max(0.0, self.toolchange_retract_length - new_total)
+                self._start_ace_alone_retract(index, remaining)
+                return self.reactor.NEVER
+
+            # 距离上限：ACE 继续完成剩余回退
+            if new_total >= self.max_parking_distance:
+                self.logger.warning(
+                    f"Retract Phase 2: max_parking_distance {self.max_parking_distance}mm "
+                    "reached without sensor1 clearing, handing off to ACE-alone"
+                )
+                self._stop_ace_sync_retract(index)
+                self._encoder_enabled = False
+                remaining = max(0.0, self.toolchange_retract_length - new_total)
+                self._start_ace_alone_retract(index, remaining)
+                return self.reactor.NEVER
+
+            # 编码器打滑检测（仅警告）
+            if self._encoder_enabled and self.encoder_pin_name and new_total > 10.0:
+                if self._encoder_distance < new_total * 0.5:
+                    self.logger.warning(
+                        f"Retract Phase 2 slip warning: commanded {new_total:.1f}mm, "
+                        f"encoder {self._encoder_distance:.1f}mm"
+                    )
+
+            # 结束条件：传感器1（extruder_sensor）清除 = 耗材退出挤出齿轮
+            if self.filament_sensor:
+                try:
+                    s1_status = self.filament_sensor.get_status(eventtime)
+                    if not s1_status.get('filament_detected', True):
+                        self.logger.info(
+                            f"Retract Phase 2: sensor1 cleared after {new_total:.1f}mm "
+                            f"(encoder {self._encoder_distance:.1f}mm), filament clear of gears"
+                        )
+                        self._stop_ace_sync_retract(index)
+                        self._encoder_enabled = False
+                        remaining = max(0.0, self.toolchange_retract_length - new_total)
+                        self._start_ace_alone_retract(index, remaining)
+                        return self.reactor.NEVER
+                except Exception as e:
+                    self.logger.error(f"Retract Phase 2: sensor1 check error: {e}")
+
+            # 继续下一步
+            self._sync_retract_loop(index, new_total, sync_start_time, sync_timeout)
+            return self.reactor.NEVER
+
+        self.reactor.register_timer(
+            check_after_step,
+            self.reactor.monotonic() + step_duration + 0.05
+        )
+
+    def _start_ace_alone_retract(self, index: int, length: float):
+        """
+        ACE 单独回退指定距离，完成后等待 slot ready 并清除 _retract_in_progress。
+        所有回退路径（正常完成 / 超时兜底 / 跳过同步）均通过此方法收尾。
+        """
+        if length < 1.0:
+            # 无需额外回退，直接等 slot ready
+            wait_start = self.reactor.monotonic()
+
+            def wait_ready_no_unwind(et):
+                if self.reactor.monotonic() - wait_start > 10.0:
+                    self.logger.warning("Retract: slot-ready timeout (no remaining)")
+                    self._retract_in_progress = False
+                    return self.reactor.NEVER
+                slots = self._info.get('slots', [])
+                if index < len(slots) and slots[index].get('status') == 'ready':
+                    self._retract_in_progress = False
+                    return self.reactor.NEVER
+                return et + 0.5
+
+            self.reactor.register_timer(wait_ready_no_unwind, self.reactor.NOW)
+            return
+
+        self.logger.info(
+            f"Retract: ACE alone retracts {length:.1f}mm at {self.retract_speed} mm/s"
+        )
+        expected_time = (length / self.retract_speed) + 1.0
+
+        def on_unwind_done(response):
+            if response.get('code', 0) != 0:
+                self.logger.error(
+                    f"Retract: ACE-alone unwind failed: {response.get('msg', '')}"
+                )
+                self._retract_error = True
+                self._retract_in_progress = False
+                return
+
+            wait_start = self.reactor.monotonic()
+
+            def wait_slot_ready(et):
+                if self.reactor.monotonic() - wait_start > expected_time + 5.0:
+                    self.logger.warning("Retract: slot-ready timeout")
+                    self._retract_in_progress = False
+                    return self.reactor.NEVER
+                slots = self._info.get('slots', [])
+                if index < len(slots) and slots[index].get('status') == 'ready':
+                    self.logger.info(f"Retract: slot {index} ready, retract complete")
+                    self._retract_in_progress = False
+                    return self.reactor.NEVER
+                return et + 0.5
+
+            self.reactor.register_timer(wait_slot_ready, self.reactor.NOW)
+
+        self.send_request({
+            "method": "unwind_filament",
+            "params": {"index": index, "length": length, "speed": self.retract_speed}
+        }, on_unwind_done)
+
+    def _stop_ace_sync_retract(self, index: int):
+        """停止第二阶段 ACE unwind_filament。"""
+        self.send_request({
+            "method": "stop_unwind_filament",
+            "params": {"index": index}
+        }, lambda r: None)
+
     def _park_to_toolhead(self, index: int):
         # 在调用任何方法之前设置停车标志,以防止数据竞争
         self._park_in_progress = True
@@ -1752,30 +2188,45 @@ class SolisAce:
             if not self.ins_spool_work:
                 # 首先回退当前工具(使用真实料槽)
                 self.logger.info(f"Retracting from real slot {real_was} (Klipper index {was})")
-                self.send_request({
-                    "method": "unwind_filament",
-                    "params": {
-                        "index": real_was,
-                        "length": self.toolchange_retract_length,
-                        "speed": self.retract_speed
-                    }
-                }, callback)
-                
-                # 等待回抽动作确实完成
-                retract_time = (self.toolchange_retract_length / self.retract_speed) + 1.0
-                self.logger.info(f"Waiting {retract_time:.1f}s for retract to complete")
-                if self.toolhead:
-                    self.toolhead.dwell(retract_time)
-                
-                # 等待料槽准备就绪(回抽后状态变为“就绪”)
-                self.logger.info(f"Waiting for real slot {real_was} to be ready")
-                timeout = self.reactor.monotonic() + 10.0  # 10 second timeout
-                while self._info['slots'][real_was]['status'] != 'ready':
-                    if self.reactor.monotonic() > timeout:
-                        gcmd.respond_raw(f"ACE Error: Timeout waiting for slot {real_was} to be ready")
-                        return
+                if self.filament_sensor_2:
+                    # 两阶段同步回退（对称于送料 Phase 2）
+                    self.logger.info(f"Using sync retract phase 2 for slot {real_was}")
+                    self._sync_retract_phase(real_was)
+                    retract_timeout = self.reactor.monotonic() + self.max_parking_timeout
+                    while self._retract_in_progress:
+                        if self._retract_error:
+                            gcmd.respond_raw(f"ACE Error: Sync retract failed for slot {real_was}")
+                            return
+                        if self.reactor.monotonic() > retract_timeout:
+                            gcmd.respond_raw(f"ACE Error: Sync retract timeout for slot {real_was}")
+                            return
+                        if self.toolhead:
+                            self.toolhead.dwell(1.0)
+                else:
+                    # 简单回退（无传感器2时的原始逻辑）
+                    self.send_request({
+                        "method": "unwind_filament",
+                        "params": {
+                            "index": real_was,
+                            "length": self.toolchange_retract_length,
+                            "speed": self.retract_speed
+                        }
+                    }, callback)
+
+                    retract_time = (self.toolchange_retract_length / self.retract_speed) + 1.0
+                    self.logger.info(f"Waiting {retract_time:.1f}s for retract to complete")
                     if self.toolhead:
-                        self.toolhead.dwell(1.0)
+                        self.toolhead.dwell(retract_time)
+
+                    # 等待料槽准备就绪
+                    self.logger.info(f"Waiting for real slot {real_was} to be ready")
+                    timeout = self.reactor.monotonic() + 10.0
+                    while self._info['slots'][real_was]['status'] != 'ready':
+                        if self.reactor.monotonic() > timeout:
+                            gcmd.respond_raw(f"ACE Error: Timeout waiting for slot {real_was} to be ready")
+                            return
+                        if self.toolhead:
+                            self.toolhead.dwell(1.0)
                 
                 self.logger.info(f"Slot {real_was} is ready, parking new tool {tool} (real slot {real_tool})")
             else:
