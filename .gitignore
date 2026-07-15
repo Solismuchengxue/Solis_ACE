@@ -34,3 +34,7 @@ node_modules/
 # PPT 工作文件（架构图生成器及其输出，不入库）
 ppt_gen.js
 *.pptx
+
+# 本地 Agent 维护文档（不入库）
+/DEVLOG.md
+/PLAYBOOK.md

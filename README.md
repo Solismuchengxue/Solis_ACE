@@ -2,212 +2,183 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-**SolisACE** 是 [ValgACE](https://github.com/agrloki/ValgACE) 的个人修改版，为 Anycubic Color Engine Pro (ACE Pro) 自动换料装置提供完整的 Klipper 集成支持。
+**SolisACE** 是 [ValgACE](https://github.com/agrloki/ValgACE) 的个人修改版，为 Anycubic Color Engine Pro（ACE Pro）提供 Klipper 集成。项目面向单台 ACE Pro，支持四槽换料、耗材烘干、槽位映射、无限料盘、温度读取、Moonraker 状态接口和独立 Web 仪表板。
 
-**状态：** 开发中 · 基于单 ACE 实例优化 · 仓库：[Solismuchengxue/Solis_ACE](https://github.com/Solismuchengxue/Solis_ACE)
+> 当前状态：开发中，仅针对单 ACE 实例优化。
 
----
+## 主要功能
 
-## 目录
+- 四槽自动换料，支持 `T0`–`T3` 与物理槽位映射
+- 进料、回退、停泊和送料辅助控制
+- 耗材烘干温度与时长控制
+- 无限料盘模式，可自定义槽位切换顺序
+- 外部耗材传感器与激进停泊模式
+- 可选的两阶段同步送料/回退和耗材编码器
+- ACE 腔体温度接入 Klipper 温度传感器
+- Moonraker 状态接口与 WebSocket 状态更新
+- 独立 Web 仪表板，不影响 Mainsail 或 Fluidd
 
-- [功能](#功能)
-- [系统要求](#系统要求)
-- [快速开始](#快速开始)
-- [设备连接](#设备连接)
-- [Web 仪表板](#web-仪表板)
-- [主要命令](#主要命令)
-- [REST API](#rest-api)
-- [文档](#文档)
-- [致谢](#致谢)
+## 使用前准备
 
----
+需要已正常运行的：
 
-## 功能
+- Klipper 与 Moonraker
+- Python 3
+- 可使用 `sudo` 的普通 Linux 用户
+- 使用 systemd，且服务名为 `klipper` 和 `moonraker`
+- Debian/Ubuntu 类系统的 APT 环境；安装脚本会在缺少 nginx 时调用 `apt-get`
+- ACE Pro 独立 24V 供电
+- ACE Pro 与 Klipper 上位机之间的 USB 数据连接
 
-**换料管理**
-- 4 槽位自动换色
-- 可调速度的进料与回退
-- 自动停泊到喷嘴
-- 无限料盘模式（infinity spool），支持自定义槽位顺序与自动触发
+其他 Linux 环境需要自行准备 nginx，并按实际服务管理方式完成重启。
 
-**干燥管理**
-- 可编程耗材烘干
-- 温度与时间控制
+### 连接 ACE Pro
 
-**槽位映射**
-- 将 Klipper 工具索引（T0–T3）重新映射到设备物理槽位
-- `ACE_GET_SLOTMAPPING` / `ACE_SET_SLOTMAPPING` / `ACE_RESET_SLOTMAPPING`
+SolisACE 使用 ACE 机壳上的 **6P MX3.0 USB 从机口**连接 Klipper 上位机。4P 接口是串联下一台 ACE 的主机口，连接上位机不会枚举设备。
 
-**连接管理**
-- 外部耗材传感器支持
-- 错误自动恢复重连（`ACE_RECONNECT`）
-- 可自定义暂停宏
+| MX3.0 针脚 | 用途 |
+|---|---|
+| 1 | 24V VCC，**不要接入 USB 线** |
+| 2 | GND |
+| 3 | USB D- |
+| 4 | USB D+ |
 
-**激进停泊（Aggressive Parking）**
-- 基于耗材传感器的替代停泊算法
-- 适合进料路径较长的打印机
+![ACE Pro MX3.0 接口](/img/molex.png)
 
-**Klipper 集成**
-- 完整 G-code 宏支持
-- 异步命令处理
-- 温度传感器集成（`temperature_ace`）
-
-**Moonraker 集成**
-- REST API 获取 ACE 状态与执行命令
-- WebSocket 实时状态推送
-
----
-
-## 系统要求
-
-- **Klipper** + **Moonraker**（已安装并正常运行）
-- **Python 3** + **pyserial**（install.sh 自动安装）
-- **nginx**（用于 Web 仪表板，install.sh 自动安装）
-- **USB**（ACE Pro 通过 USB CDC 连接）
-
----
-
-## 快速开始
+连接后确认设备路径存在：
 
 ```bash
-# 克隆仓库
+ls -l /dev/serial/by-id/
+```
+
+默认设备路径为：
+
+```text
+/dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+```
+
+## 安装
+
+```bash
 git clone https://github.com/Solismuchengxue/Solis_ACE.git
 cd Solis_ACE
-
-# 运行安装脚本（交互式）
 ./install.sh
 ```
 
-install.sh 会自动完成：
-1. 安装 Python 依赖（`pyserial`）
-2. 创建 Klipper 扩展符号链接（`ace.py`，已含温度传感器）
-3. 复制配置文件（`ace.cfg`）并添加至 `printer.cfg`
-4. 安装 Moonraker 组件（`ace_status.py`）并配置更新管理器
-5. 部署 Web 仪表板到 nginx（默认端口 8088）
-6. 在 `moonraker.conf` 中配置 CORS（允许仪表板直连 Moonraker）
-7. 重启 Klipper 和 Moonraker
+请使用普通用户运行安装脚本，不要直接以 `root` 用户运行。安装向导会让你确认 Klipper、Moonraker 和打印机配置目录，然后完成：
 
-安装完成后，在 Klipper 控制台验证：
+1. 安装 `pyserial`。
+2. 链接 Klipper 扩展与 Moonraker 组件。
+3. 复制 `ace.cfg` 并在 `printer.cfg` 中加入引用。
+4. 配置 Moonraker 更新管理器。
+5. 安装 nginx 并部署 Web 仪表板，默认端口为 `8088`。
+6. 询问是否重启 Klipper 与 Moonraker。
+
+如果打印机目录不是默认位置，请在安装向导中填写实际路径。
+
+### 初次配置
+
+安装后打开打印机配置目录中的 `ace.cfg`，至少检查：
+
+```ini
+[ace]
+serial: /dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00
+feed_speed: 25
+retract_speed: 25
+toolchange_retract_length: 100
+max_dryer_temperature: 55
+```
+
+其中：
+
+- `serial` 必须与本机实际设备路径一致。
+- `toolchange_retract_length` 必须按打印机的真实耗材路径标定。
+- 紧齿轮挤出机或长送料路径通常需要启用 `aggressive_parking` 并配置外部耗材传感器。
+- 默认 `_ACE_PRE_TOOLCHANGE` 与 `_ACE_POST_TOOLCHANGE` 只输出提示；需要切料、冲刷或擦嘴时，请按自己的打印机尺寸修改宏。
+
+修改后重启 Klipper 与 Moonraker。
+
+## 验证安装
+
+在 Klipper 控制台运行：
 
 ```gcode
+ACE_CONNECTION_STATUS
 ACE_STATUS
 ACE_DEBUG METHOD=get_info
 ```
 
----
+能够看到连接状态、设备信息和四个槽位状态，即表示基础通信正常。
 
-## 设备连接
+## 日常使用
 
-ACE Pro 通过 MX3.0 6P 端子连接标准 USB：
+### Web 仪表板
 
-![Molex](/img/molex.png)
+安装脚本默认将仪表板部署到：
 
-| 针脚 | 说明 |
-|------|------|
-| 1 | 24V VCC — **勿接！** ACE 有独立供电 |
-| 2 | GND |
-| 3 | D-（USB 数据负极） |
-| 4 | D+（USB 数据正极） |
-
-将 MX3.0 端子连接到普通 USB 线即可。端子可在电商搜索【MX3.0 公壳】。
-
-![MX3.0](/img/MX3.0Male shell+ female terminal.png)
-
-> ⚠️ **6P 和 4P 别插错**：ACE 机壳上有 **6P** 和 **4P** 两个 MX3.0 口，方向相反。
-> - **6P = USB 从机口（上行）** → 连主机（打印机 / Klipper 上位机），枚举为 `/dev/serial/by-id/usb-ANYCUBIC_ACE_1-if00`。**SolisACE 用这个。**
-> - **4P = USB 主机口（下行）** → 用于**串联第二台 ACE**（本台 4P → 下台 6P）。它是主机侧端口，**插到上位机不会枚举出设备**（实测：用 4P 在 Ubuntu 上找不到 `/dev/serial/by-id/...`）。
-
----
-
-## Web 仪表板
-
-![Web](/img/valgace-web.png)
-
-install.sh 自动将 Web 仪表板部署到 nginx，默认端口 **8088**：
-
-```
+```text
 http://<打印机IP>:8088/ace.html
 ```
 
-**连接方式：** 浏览器直连 Moonraker（`打印机IP:7125`），nginx 仅提供静态文件服务。install.sh 已自动配置 Moonraker CORS。
+![SolisACE Web 仪表板](/img/valgace-web.png)
 
-主要功能：
-- 实时设备状态
-- 槽位管理（进料、回退、停泊）
-- 干燥控制
-- WebSocket 实时更新
+仪表板可用于查看设备与槽位状态、进料、回退、停泊、设置耗材信息以及控制烘干。
 
----
-
-## 主要命令
+### 常用命令
 
 ```gcode
 ACE_STATUS                              # 查看设备状态
-ACE_CHANGE_TOOL TOOL=0                  # 换到槽位 0
-ACE_CHANGE_TOOL TOOL=-1                 # 卸载耗材
-ACE_PARK_TO_TOOLHEAD INDEX=0            # 停泊到喷嘴
-ACE_FEED INDEX=0 LENGTH=50 SPEED=25     # 进给
-ACE_RETRACT INDEX=0 LENGTH=50 SPEED=25  # 回退
-ACE_START_DRYING TEMP=50 DURATION=120   # 开始烘干
+ACE_CHANGE_TOOL TOOL=0                  # 换到 T0 对应的槽位
+ACE_CHANGE_TOOL TOOL=-1                 # 卸载当前耗材
+ACE_PARK_TO_TOOLHEAD INDEX=0            # 将槽位 0 的耗材送到打印头
+ACE_FEED INDEX=0 LENGTH=50 SPEED=25     # 进料 50 mm
+ACE_RETRACT INDEX=0 LENGTH=50 SPEED=25  # 回退 50 mm
+ACE_START_DRYING TEMP=50 DURATION=120   # 50°C 烘干 120 分钟
 ACE_STOP_DRYING                         # 停止烘干
-ACE_INFINITY_SPOOL                      # 无限料盘切换
-ACE_SET_SLOTMAPPING INDEX=0 SLOT=1      # 槽位映射
-ACE_RECONNECT                           # 重新连接
-ACE_GET_HELP                            # 查看所有命令
+ACE_SET_SLOTMAPPING INDEX=0 SLOT=1      # 将 T0 映射到物理槽位 1
+ACE_INFINITY_SPOOL                      # 手动触发无限料盘换料
+ACE_RECONNECT                           # 重新连接 ACE
+ACE_GET_HELP                            # 查看全部命令
 ```
 
-完整命令列表见 [命令参考](docs/COMMANDS.md)。
+## 更新与卸载
 
----
-
-## REST API
+已配置 Moonraker 更新管理器时，可在 Mainsail 或 Fluidd 中拉取 SolisACE 更新。也可以在仓库目录手动更新：
 
 ```bash
-# 获取 ACE 状态
-curl http://<打印机IP>:7125/server/ace/status
-
-# 执行命令
-curl -X POST http://<打印机IP>:7125/server/ace/command \
-  -H "Content-Type: application/json" \
-  -d '{"command":"ACE_PARK_TO_TOOLHEAD","params":{"INDEX":0}}'
+git pull
+sudo systemctl restart klipper moonraker
 ```
 
-详见 [Moonraker API 文档](docs/MOONRAKER_API.md)。
+Klipper 扩展和 Moonraker 组件通过符号链接安装，拉取代码并重启对应服务后即可生效。`ace.cfg` 和 Web 仪表板是复制安装的，不会随 `git pull` 自动更新：
 
----
+- 更新涉及 Moonraker 组件时，需要手动重启 Moonraker；更新管理器默认只管理 Klipper 服务。
+- 更新涉及 `ace.cfg` 时，先备份并比较打印机配置目录中的用户配置。重新运行安装脚本会覆盖已安装的 `ace.cfg`。
+- 更新涉及 `webui/` 时，需要重新运行安装脚本部署 Web 文件。
 
-## 文档
+卸载：
 
-| 文档 | 说明 |
-|------|------|
-| [安装指南](docs/INSTALLATION.md) | 详细安装步骤 |
-| [用户指南](docs/USER_GUIDE.md) | 使用方法 |
-| [命令参考](docs/COMMANDS.md) | 所有 G-code 命令 |
-| [配置参考](docs/CONFIGURATION.md) | 全部配置参数 |
-| [Moonraker API](docs/MOONRAKER_API.md) | REST API 说明 |
-| [故障排除](docs/TROUBLESHOOTING.md) | 常见问题 |
-| [通信协议](docs/PROTOCOL.md) | ACE 二进制协议 |
-| [温度传感器](docs/ACE_TEMPERATURE_SENSOR.md) | temperature_ace 模块 |
-| [变更日志](docs/changelog.md) | 版本历史 |
-| [硬件底层资料](docs/HARDWARE.md) | 主板引脚、芯片、内部结构 |
+```bash
+./install.sh -u
+```
 
----
+卸载脚本会移除程序链接和 nginx 站点配置；`ace.cfg`、`printer.cfg` 与 `moonraker.conf` 中的相关配置需要按提示手动清理。
 
-## 支持
+## 使用文档
 
-- **Telegram：** [perdoling3d](https://t.me/perdoling3d/45834) · [ERCFcrealityACEpro](https://t.me/ERCFcrealityACEpro/21334)
-- **GitHub Issues：** [Solismuchengxue/Solis_ACE](https://github.com/Solismuchengxue/Solis_ACE/issues)
-- **演示视频：** [YouTube](https://youtu.be/hozubbjeEw8)
+| 文档 | 用途 |
+|---|---|
+| [安装指南](docs/INSTALLATION.md) | 完整安装、更新与卸载步骤 |
+| [用户指南](docs/USER_GUIDE.md) | 换料、送料、烘干和无限料盘操作 |
+| [命令参考](docs/COMMANDS.md) | 全部 G-code 命令及参数 |
+| [配置参考](docs/CONFIGURATION.md) | 配置项、宏与推荐值 |
+| [故障排除](docs/TROUBLESHOOTING.md) | 连接、槽位、烘干与 Web 问题排查 |
+| [温度传感器](docs/ACE_TEMPERATURE_SENSOR.md) | 在 Klipper 中使用 ACE 腔体温度 |
 
----
+遇到问题可在 [GitHub Issues](https://github.com/Solismuchengxue/Solis_ACE/issues) 反馈。
 
-## 致谢
+## 致谢与许可
 
-- [ValgACE](https://github.com/agrloki/ValgACE) by agrloki — 本项目的基础
-- [DuckACE](https://github.com/utkabobr/DuckACE) by utkabobr
-- [BunnyACE](https://github.com/BlackFrogKok/BunnyACE) by BlackFrogKok
-- [acepro-mmu-dashboard](https://github.com/ducati1198/acepro-mmu-dashboard) by ducati1198
+本项目基于 [ValgACE](https://github.com/agrloki/ValgACE)，并参考了 [DuckACE](https://github.com/utkabobr/DuckACE)、[BunnyACE](https://github.com/BlackFrogKok/BunnyACE) 和 [acepro-mmu-dashboard](https://github.com/ducati1198/acepro-mmu-dashboard)。
 
-## 许可证
-
-[GNU GPL v3](LICENSE.md)
+项目使用 [GNU GPL v3](LICENSE.md) 许可。
