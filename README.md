@@ -2,9 +2,9 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-**SolisACE** 是 [ValgACE](https://github.com/agrloki/ValgACE) 的个人修改版，为 Anycubic Color Engine Pro（ACE Pro）提供 Klipper 集成。项目面向单台 ACE Pro，支持四槽换料、耗材烘干、槽位映射、无限料盘、温度读取、Moonraker 状态接口和独立 Web 仪表板。
+为 Anycubic Color Engine Pro（ACE Pro）提供 Klipper 集成。项目面向单台 ACE Pro，支持四槽换料、耗材烘干、槽位映射、无限料盘、温度读取、Moonraker 状态接口和独立 Web 仪表板。
 
-> 当前状态：开发中，仅针对单 ACE 实例优化。
+> 当前状态：开发中，仅针对Voron Trident。
 
 ## 主要功能
 
